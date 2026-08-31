@@ -1,6 +1,6 @@
-//你要知道，这是最强的主文件，所有的入口
 #include <iostream>
 #include <cstring>
+#include <csignal>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -40,11 +40,14 @@ void handle_client(int client_fd) {
 int main() {
     int server_fd, client_fd;
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
+    socklen_t addrlen = sizeof(address);
     int opt = 1;
 
-    // 1. 创建 TCP Socket
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    // 0. 忽略 SIGPIPE，防止客户端半路断开时整个服务器进程被杀掉
+    signal(SIGPIPE, SIG_IGN);
+
+    // 1. 创建 TCP Socket（socket 失败返回 -1，不是 0！）
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket 创建失败");
         return -1;
     }
@@ -79,7 +82,7 @@ int main() {
 
     // 5. 主循环：不断接受新客户端
     while (true) {
-        if ((client_fd = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
+        if ((client_fd = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
             perror("accept 失败");
             continue;
         }
