@@ -1,0 +1,35 @@
+# 课程原始 PDF（已提取为 md 文档）
+课程要求/
+
+# 构建产物
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.out
+*.exe~
+MailForge
+build/
+Debug/
+Release/
+bin/
+obj/
+
+# 运行时数据
+data/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+CMakeLists.txt.user
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 日志
+*.log
