@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <ctime>
 
-#define PORT 8888
+#define PORT 3225
 #define BUFFER_SIZE 4096
 
 void handle_client(int client_fd) {
