@@ -20,6 +20,9 @@ obj/
 
 # 运行时数据
 data/
+mailbox/
+SmtpClientWeb/bridge
+
 
 # IDE
 .vscode/

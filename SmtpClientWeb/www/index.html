@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMTP 客户端终端 — MailForge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <h1>📧 SMTP 客户端 · 文本交互终端</h1>
+    <p class="sub">本地 SMTP 服务器 <code>127.0.0.1:2525</code> — 真实的 SMTP 协议对话</p>
+    <div class="toolbar">
+      <span id="connBadge" class="badge off">○ 未连接</span>
+      <button id="btnConnect" class="btn primary">连接</button>
+      <button id="btnDisconnect" class="btn" disabled>断开</button>
+      <button id="btnDemo" class="btn demo">▶ 自动演示</button>
+      <button id="btnClear" class="btn ghost">清屏</button>
+    </div>
+  </header>
+
+  <div class="chips">
+    <span class="chips-label">快速命令：</span>
+    <button class="chip" data-cmd="EHLO localhost">EHLO</button>
+    <button class="chip" data-cmd="MAIL FROM:&lt;alice@example.com&gt;">MAIL FROM</button>
+    <button class="chip" data-cmd="RCPT TO:&lt;bob@example.com&gt;">RCPT TO</button>
+    <button class="chip" data-cmd="DATA">DATA</button>
+    <button class="chip" data-cmd="QUIT">QUIT</button>
+  </div>
+
+  <div id="terminal" class="terminal" aria-live="polite"></div>
+
+  <div id="dataBox" class="data-box hidden">
+    <div class="data-title">✉ 当前处于 DATA 模式 —— 在这里输入邮件正文（可多行），点“发送正文”完成</div>
+    <textarea id="dataBody" rows="5" spellcheck="false"
+      placeholder="Subject: Hello&#10;&#10;你好，这是一封通过 MailForge 发送的测试邮件！&#10;."></textarea>
+    <button id="btnSendData" class="btn primary">发送正文（自动补 . ）</button>
+  </div>
+
+  <div class="input-row">
+    <span class="prompt">&gt;</span>
+    <input id="cmdInput" type="text"
+      placeholder="输入 SMTP 命令后回车，例如：HELO localhost"
+      autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+    <button id="btnSend" class="btn primary" disabled>发送</button>
+  </div>
+
+  <p class="foot">流程：连接 → EHLO → MAIL FROM → RCPT TO → DATA（输入正文）→ QUIT　|　蓝色=客户端命令　绿色=服务器响应</p>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
