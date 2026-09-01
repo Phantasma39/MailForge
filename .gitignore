@@ -11,6 +11,7 @@
 *.out
 *.exe~
 MailForge
+src/server
 build/
 Debug/
 Release/

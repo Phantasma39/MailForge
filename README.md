@@ -425,6 +425,17 @@ POP3 把邮件下载到本地（断网也能看）；IMAP 在服务器端管理�
 
 ### 编译与启动
 
+> 📌 **当前进度：里程碑 1 前置 —— HTTP 连通性验证（`src/server.cpp`）**
+>
+> ```bash
+> # 进入源码目录，编译并启动服务器（监听 8888 端口）
+> cd src && g++ -o server server.cpp && ./server
+>
+> # 浏览器访问 http://localhost:8888，看到页面即成功
+> ```
+
+**目标架构（后续里程碑逐步实现）：**
+
 ```bash
 # 编译全部目标
 make
@@ -439,6 +450,56 @@ make
 # 运行测试
 make test
 ```
+
+## 🔌 局域网 / ZeroTier 远程访问
+
+> 服务器跑在 **WSL2** 时，WSL2 内部是一个 NAT 虚拟网络，局域网或 ZeroTier 里的其他设备
+> **无法直接访问** WSL2 内部的 IP（如 `172.18.x.x`）。需要在 Windows 上加一层**端口转发**，
+> 把外部请求转发进 WSL2。
+
+```
+其他设备 ──► ZeroTier/局域网 ──► Windows(0.0.0.0:8888) ──端口转发──► WSL2(172.18.x.x:8888) ──► server
+```
+
+### 1. 一键配置脚本（`setup_portproxy.bat`）
+
+1. **右键 → 以管理员身份运行** 仓库根目录的 `setup_portproxy.bat`
+2. 脚本自动完成三件事：
+   - 读取 WSL2 当前 IP（`wsl hostname -I`）
+   - 添加端口转发：`0.0.0.0:8888 → WSL2:8888`（覆盖所有网卡，含 ZeroTier）
+   - 放行 Windows 防火墙入站 TCP 8888
+3. 运行成功后桌面会生成 `portproxy_setup.log` 便于排错
+4. ⚠️ **重启电脑后 WSL2 IP 会变**，重新运行一次脚本即可（脚本每次都会自动获取最新 IP）
+
+### 2. 局域网直接访问（同一 WiFi）
+
+其他设备浏览器访问：
+
+```
+http://<Windows主机局域网IP>:8888
+```
+
+> ⚠️ 校园网普遍开启 **AP/用户隔离**：同一 WiFi 下设备之间互相访问不了，此时请用 ZeroTier。
+
+### 3. ZeroTier 跨网段访问（校园网推荐）
+
+ZeroTier 把多台设备组成**虚拟局域网**，流量走加密隧道，绕开校园网 AP 隔离与防火墙：
+
+1. 各设备安装 [ZeroTier](https://www.zerotier.com/) 并加入同一个网络（本项目使用 `miku_miku`）
+2. 本机 ZeroTier 运行后获得虚拟 IP（本项目当前为 `10.46.223.81`）
+3. 其他设备访问：`http://<本机ZeroTier IP>:8888`
+
+### 4. 连通性验证
+
+```bash
+# 本机验证端口转发是否生效（Windows cmd / PowerShell）
+telnet 127.0.0.1 8888
+Test-NetConnection 10.46.223.81 -Port 8888
+
+# 其他设备验证（Linux / Termux）
+nc -vz 10.46.223.81 8888
+```
+
 
 ## 🧪 测试
 
@@ -467,8 +528,10 @@ MailForge/
 ├── Makefile                  # 构建脚本
 ├── README.md                 # 项目介绍
 ├── requirements.md           # 课程需求清单
+├── setup_portproxy.bat       # 局域网/ZeroTier 端口转发一键配置（Windows）
 ├── .gitignore
 ├── src/                      # C++ 源码
+│   ├── server.cpp            # 里程碑1：HTTP 连通性服务器（端口 8888）
 │   ├── main.cpp              # 入口：启动 SMTP/POP3/Web 三个服务
 │   ├── net/socket.hpp        # Socket 跨平台封装
 │   ├── smtp/smtp_server.*    # SMTP 服务器（RFC 5321）
