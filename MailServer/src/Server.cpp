@@ -78,12 +78,39 @@ bool Server::start(){
             perror("accept 失败");
             continue;    // 非致命错误，继续等待下一个连接
         }
-    }
+
         char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);      //把二进制的IP地址转化成刻度的0.0.0.0类型的ip地址
+        
         std::cout << "[服务器] 新连接来自 " << client_ip << ":"
                   << ntohs(client_addr.sin_port) << std::endl;
 
+
+    //多线程这一块我还没有搞懂，后面可能用线程池吧
+        std::thread worker([this, client_fd]() {
+            this->handleClient(client_fd);
+
+            close(client_fd);
+        });
+        worker.detach();
+    }
+
+    //关闭服务器
+    close(server_fd);
+    std::cout << "[服务器] 已停止" << std::endl;
+    return true;
 }
 
+
+void Server::stop() {
+    if (is_running) {
+        is_running = false;
+        // 为了快速退出 accept 阻塞，可以在这里关闭 server_fd
+        // 这样 accept 会立即返回 -1，循环就会退出
+        if (server_fd != -1) {
+            close(server_fd);
+            server_fd = -1;   // 避免重复关闭（close 已关闭的 fd 是错误操作）
+        }
+    }
+}
 
