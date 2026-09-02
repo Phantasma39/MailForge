@@ -1,0 +1,10 @@
+From: alice@example.com
+To: bob@example.com
+Date: Wed Sep  2 10:01:30 2026
+Subject: (no subject)
+
+Subject: Hello from MailForge
+
+这是一封由「浏览器 SMTP 客户端」发送的测试邮件！
+正文通过 DATA 命令逐行传给服务器。
+祝课程设计顺利～
