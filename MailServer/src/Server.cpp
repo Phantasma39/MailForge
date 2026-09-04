@@ -30,11 +30,12 @@ bool Server::start(){
         perror("socket创建失败");
         return false;
     }
-    else{return true;}
+    // 注意：这里不能提前 return！下面的 setsockopt/bind/listen/accept 循环
+    // 都是服务器必须执行的步骤，如果在这里 return，服务器会"秒退"不监听端口
 
     //设置端口复用，我有点不懂，但是大概就是如果不设置在失败后不能把端口立即服用
     int opt = 1;
-    if(setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt<0))){
+    if(setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt))){
         perror("setsockopt 失败");
         close(server_fd);
         return false;

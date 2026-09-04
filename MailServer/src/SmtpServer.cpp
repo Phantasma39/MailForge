@@ -1,207 +1,260 @@
-// ============================================================================
-//  SmtpServer.cpp —— SMTP 服务器实现（协议层）
-//
-//  SMTP（简单邮件传输协议）是互联网上发邮件的标准协议。
-//  它的本质是"基于 TCP 的文本对话"：
-//    客户端 → 一行命令（HELO / MAIL FROM / RCPT TO / DATA / QUIT）
-//    服务器 → 一行状态码（250 / 354 / 221 ...）
-//
-//  本文件实现的核心函数：
-//    processCommand()  —— 命令状态机，整个服务器的"大脑"
-//    handleClient()    —— 一个客户端连接的完整生命周期（含行缓冲）
-//    saveMail()        —— 把拼好的邮件以 .eml 格式存盘
-//
-//  网络层（socket/bind/accept/多线程）由 Server 基类完成，
-//  本文件只关心"收到一行文本后怎么应答"
-// ============================================================================
+//用于实现SMTP协议的代码部分，需要继承Server类
+
 #include "SmtpServer.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cctype>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <ctime>
 #include <chrono>
-#include <sys/socket.h>   // 提供 recv, send
+#include <sys/socket.h> 
 
-// ============================================================================
-//  构造函数
-//  作用：
-//    1. 把端口号交给 Server 基类（基类负责 socket/bind/listen/accept）
-//    2. 创建邮件存储目录 ./mailbox（如果不存在）
-// ============================================================================
-SmtpServer::SmtpServer(int port) : Server(port) {
-    // 创建邮件存储目录（仅 Unix/Linux）
-    // mkdir 第二个参数 0755 是权限位：拥有者可读写执行(7)，
-    // 同组用户可读执行(5)，其他人可读执行(5)
-    // 注意：如果目录已存在，mkdir 会返回 -1，这里不检查返回值也没关系
-    mkdir("./mailbox", 0755);
+SmtpServer::SmtpServer(int port):Server(port){      //初始化SmptServer类，同时创建文件夹来储存邮件，0755是权限，我也不是很理解
+    mkdir("./mailbox",0755);
 }
 
-// ============================================================================
-//  发送响应（封装 send）
-//  作用：给响应字符串末尾补上 SMTP 协议要求的 \r\n，然后通过 socket 发出
-//  为什么必须是 \r\n：
-//    SMTP 是文本协议，RFC 规定所有命令/响应行必须以 CRLF（回车+换行）结尾，
-//    如果只发 \n，很多严格的邮件客户端会解析失败
-// ============================================================================
-void SmtpServer::sendResponse(int fd, const std::string& response) {
-    std::string msg = response + "\r\n";
-    // send() 是系统调用，把数据写入 TCP 发送缓冲区
-    // 返回值是实际发送的字节数；这里数据量小，简单起见不检查是否发完
-    // （严格的做法是循环调用 send 直到全部发完，或处理半包情况）
-    send(fd, msg.c_str(), msg.size(), 0);
-}
 
-// ============================================================================
-//  处理单个命令 —— 整个 SMTP 服务器的"大脑"（核心状态机）
-//
-//  返回 true  = 继续会话（还可以继续收发命令）
-//  返回 false = 结束会话（通常是收到 QUIT）
-//
-//  参数说明：
-//    fd       : 客户端 socket，用于发送响应
-//    line     : 客户端发来的一行内容（已去掉 \r\n）
-//    mail     : 当前会话正在拼装的邮件（跨命令共享状态，引用传参）
-//    dataMode : 是否处于 DATA 模式（引用传参，函数内可能修改它）
-//
-//  SMTP 协议状态机（简化）：
-//    (连接) → 220 → [HELO/EHLO] → [MAIL FROM] → [RCPT TO] → [DATA] → 正文 → [QUIT]
-//    每一步必须按顺序来，否则服务器会返回错误码（如 503、501）
-// ============================================================================
-bool SmtpServer::processCommand(int fd, const std::string& line, SmtpMail& mail, bool& dataMode) {
-    // ============ DATA 模式：此时 line 不是命令，而是正文的一行 ============
-    if (dataMode) {
-        // 如果收到单独的点（"."），表示 DATA 正文结束（RFC 5321 的规定）
-        if (line == ".") {
-            dataMode = false;   // 退出 DATA 模式
-            sendResponse(fd, "250 Message accepted for delivery");   // 告知客户端邮件已接收
-            saveMail(mail);     // 把拼好的邮件落盘保存
-            mail = SmtpMail();  // 清空邮件对象，准备接收下一封
-        } else {
-            // 普通正文行：追加到邮件正文，保留换行（\r\n）
-            // 这就是为什么收到的邮件里每一行都有换行分隔
-            mail.body += line + "\r\n";
+//用于保证send全部发完，处理中断问题
+bool SmtpServer::sendAll(int fd, const char* data, size_t len) {
+    size_t total_sent = 0;  // 已经发出去多少个字节
+    
+    while (total_sent < len) {
+        // 从 data + total_sent 地址开始发送剩余内容
+        ssize_t sent = send(fd, data + total_sent, len - total_sent, 0);
+        
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("send 错误");
+            return false;
         }
-        return true;   // DATA 模式下不解析任何命令，始终继续会话
+        if (sent == 0) {
+            std::cerr << "send 返回 0，可能连接已关闭" << std::endl;
+            return false;
+        }
+        total_sent += sent;  // 累加已发送的字节数
     }
+    return true;  // 全部发送完毕
+}
 
-    // ============ 正常命令解析 ============
-    if (line.empty()) return true;   // 空行直接忽略，不响应
-
-    // 把一行拆成"命令 + 参数"两部分
-    // 例如："MAIL FROM:<alice@qq.com>" → cmd="MAIL", args="FROM:<alice@qq.com>"
-    std::string cmd;
-    std::string args;
-    size_t space = line.find(' ');   // 找第一个空格的位置
-    if (space != std::string::npos) {
-        cmd = line.substr(0, space);          // 空格之前是命令名
-        args = line.substr(space + 1);        // 空格之后是参数
-        // 去除可能的多余空格（兼容 "MAIL FROM:   <a@b>" 这种写法）
-        while (!args.empty() && args.front() == ' ') args.erase(0, 1);
-    } else {
-        cmd = line;   // 没有参数的命令，如 "QUIT"、"DATA"
+void SmtpServer::sendResponse(int fd, const std::string&response){
+    std::string msg=response+"\r\n";
+  // 调用sendAll函数，确保完全发送完毕
+    if (!sendAll(fd, msg.c_str(), msg.size())) {
+        std::cerr << "[SMTP] 发送响应失败，即将断开连接: " << response << std::endl;
     }
+}
 
-    // 转为大写以简化比较（SMTP 命令不区分大小写）
-    // 所以客户端发 "helo" 或 "HELO" 都能正确识别
-    for (auto& c : cmd) c = toupper(c);
+//按照SMTP协议处理命令
+bool SmtpServer::processCommand(int fd,const std::string& line,SmtpMail& mail,bool& dataMode){
 
-    // ============ HELO / EHLO：打招呼，开始一段 SMTP 会话 ============
-    // EHLO 是扩展版 HELO，现在客户端基本都用 EHLO
-    if (cmd == "HELO" || cmd == "EHLO") {
-        std::string domain = args.empty() ? "unknown" : args;   // 客户端自我介绍（域名）
-        sendResponse(fd, "250 Hello " + domain + ", nice to meet you");
+    if(dataMode){
+        if(line =="."){     //smtp协议，在DATA模式下，如果出现一个"."，表示结束
+            dataMode = false;   //  退出DATA模式
+
+            parseMailData(mail);
+
+            sendResponse(fd,"250 Message accepted for delivery");       //告知客户端接受到DATA
+            saveMail(mail);
+            mail=SmtpMail();//清空邮件对象
+        }else{      //没有结束，就继续加上"\r\n""
+            // 注意：还要还原"点填充"。SMTP 规定邮件内容里任何以 "." 开头的行，
+            // 客户端都必须写成 ".."，否则会被误认为是结束标志 "."，
+            // 所以服务器要把多余的那个点还原回去，例如 "..abc" → ".abc"
+            std::string dataLine = line;
+            if (dataLine.size() > 1 && dataLine[0] == '.' && dataLine[1] == '.') {
+                dataLine = dataLine.substr(1);
+            }
+            mail.body += dataLine + "\r\n";
+        }
         return true;
     }
 
-    // ============ MAIL FROM：声明发件人 ============
-    // 标准格式：MAIL FROM:<sender@example.com>
-    if (cmd == "MAIL") {
-        if (args.find("FROM:") == 0) {   // 参数必须以 FROM: 开头
-            std::string fromAddr = args.substr(5);   // 去掉 "FROM:" 前缀
-            // 去除前导空格（兼容 "MAIL FROM: <a@b>"）
-            while (!fromAddr.empty() && fromAddr.front() == ' ') fromAddr.erase(0, 1);
-            // 去除尖括号 < >（SMTP 里地址常写成 <a@b> 形式）
+    // 不在 DATA 模式：line 是一条真正的 SMTP 命令，继续往下解析
+    //正常命令
+    if(line.empty()) return true;//忽略空行
+
+    //把一行拆成“命令+参数”模式
+
+    std::string cmd;    //命令
+    std::string args;    //参数
+    size_t space =line.find(' ');     //找到第一个空格的位置
+    if (space !=std::string::npos){     //表示找到了第一个空格的位置
+        cmd = line.substr(0,space);
+        args=line.substr(space+1);
+        while (!args.empty()&&args.front()==' ')    args.erase(0,1);    //删掉所有的空格
+    }else{
+        cmd=line;   //没有参数的单独命令
+    }
+
+    for(auto& c:cmd) c=toupper(c);      //全部转化成大写，因为SMTP协议不分大小写
+
+    //HELO或者EHLO命令
+    if(cmd=="HELO"||cmd=="EHLO"){ 
+
+        std::string domain ;
+        if(args.empty())    domain= "unknown" ;
+        else domain = args;
+    
+        sendResponse(fd,"250 Hello "+domain+",nice to meet you");
+        return true;
+    }
+
+    //MAIL FROM:<a@example.com>标准情况
+    //MAIL命令，后面跟FROM:<a@example.com>
+    if(cmd == "MAIL"){
+        if (args.find("FROM:") == 0){   //必须要以FROM:开头
+            std::string fromAddr = args.substr(5);  //定位到FROM:后面
+            while (!fromAddr.empty() && fromAddr.front()==' ')    fromAddr.erase(0,1);    //删掉前面的空格，跟之前一样
+            //删除掉<>，因为SMTP格式都是这样的
             if (!fromAddr.empty() && fromAddr.front() == '<') fromAddr.erase(0, 1);
+
             if (!fromAddr.empty() && fromAddr.back() == '>') fromAddr.pop_back();
+
             if (fromAddr.empty()) {
                 sendResponse(fd, "501 Syntax error in MAIL FROM");   // 地址为空 → 语法错误
             } else {
                 mail.from = fromAddr;    // 存入会话状态（跨命令共享）
                 sendResponse(fd, "250 OK");
-            }
+            } 
         } else {
             sendResponse(fd, "501 Syntax error in MAIL FROM");
         }
         return true;
     }
 
-    // ============ RCPT TO：声明收件人 ============
-    // 标准格式：RCPT TO:<receiver@example.com>
-    // 可以多次调用 RCPT TO 来添加多个收件人（群发）
-    if (cmd == "RCPT") {
-        if (args.find("TO:") == 0) {
-            std::string toAddr = args.substr(3);   // 去掉 "TO:" 前缀
-            // 同样处理前导空格和尖括号
-            while (!toAddr.empty() && toAddr.front() == ' ') toAddr.erase(0, 1);
+    //同理写RCPT TO：<b@example.com>
+    if(cmd == "RCPT"){
+        if (args.find("TO:") == 0){   //必须要以TO:开头
+            std::string toAddr = args.substr(3);  //定位到TO:后面
+            while (!toAddr.empty() && toAddr.front()==' ')    toAddr.erase(0,1);    //删掉前面的空格，跟之前一样
+            //删除掉<>，因为SMTP格式都是这样的
             if (!toAddr.empty() && toAddr.front() == '<') toAddr.erase(0, 1);
+
             if (!toAddr.empty() && toAddr.back() == '>') toAddr.pop_back();
+
             if (toAddr.empty()) {
-                sendResponse(fd, "501 Syntax error in RCPT TO");
+                sendResponse(fd, "501 Syntax error in RCPT TO");   //语法错误
             } else {
-                mail.to = toAddr;
+                mail.to = toAddr;    // 存入会话状态（跨命令共享）
                 sendResponse(fd, "250 OK");
-            }
+            } 
         } else {
             sendResponse(fd, "501 Syntax error in RCPT TO");
         }
         return true;
     }
 
-    // ============ DATA：开始发送邮件正文 ============
-    // 规范顺序是：MAIL FROM → RCPT TO → DATA
-    if (cmd == "DATA") {
-        // 检查前置条件：如果没有先声明发件人/收件人就进入 DATA，返回 503
-        if (mail.from.empty() || mail.to.empty()) {
-            sendResponse(fd, "503 Bad sequence of commands (need MAIL and RCPT first)");
+    //DATA命令，表示开始发送正文内容
+    if(cmd =="DATA"){
+        if(mail.from.empty()||mail.to.empty()){     //看看有没有来去的地址
+           sendResponse(fd, "503 Bad sequence of commands (need MAIL and RCPT first)"); 
         } else {
-            // 354 是"可以开始发送数据"的专用响应码，
-            // 后面客户端会逐行发送正文，直到单独一行 "." 结束
-            sendResponse(fd, "354 End data with <CR><LF>.<CR><LF>");
-            dataMode = true;   // 进入数据模式：之后收到的一行行内容都算正文
+            sendResponse(fd,"354 End data with <CR><LF>.<CR><LF>");
+            dataMode = true;    //可以写邮件内容了
         }
         return true;
     }
 
-    // ============ QUIT：结束会话 ============
     if (cmd == "QUIT") {
         sendResponse(fd, "221 Bye");
         return false;   // 返回 false → handleClient 会关闭连接，结束会话
     }
 
-    // ============ 未知命令 ============
+        // ============ 未知命令 ============
     sendResponse(fd, "500 Unrecognized command");
+    
     return true;
 }
 
-// ============================================================================
-//  主循环：SMTP 对话（处理一个客户端连接的完整生命周期）
-//
-//  流程：
-//    1. 先发 220 问候语（服务器就绪）
-//    2. 循环接收客户端发来的数据，按行拆分成命令
-//    3. 逐行交给 processCommand 处理
-//    4. 直到 QUIT（processCommand 返回 false）或客户端断开，关闭连接
-//
-//  难点：TCP 是"流"而不是"消息"
-//    recv() 一次收到的数据可能包含多条命令，也可能只包含半条命令：
-//      - 例如一次 recv 可能收到 "EHLO x\r\nMAIL FROM:<a@b>\r\n" 两条命令
-//      - 也可能 "MAIL FR" 只来了一半，要等下一次 recv 拼完整
-//    所以不能"recv 一次就当一条命令"，必须用缓冲区积累 + 按 \n 拆分
-//    这就是下面 buf 变量的意义：它是"跨 recv 的粘包/拆包缓冲区"
-// ============================================================================
+//处理DATA收到的邮件原文，里面会有From：,To：,subject，正文
+
+void SmtpServer::parseMailData(SmtpMail& mail){
+
+    //除去开头的空行和无意义内容
+
+    size_t pos=0;      //指针位置
+    while(pos<mail.body.size()){
+        size_t eol=mail.body.find('\n',pos);    //从pos开始寻找第一个换行符
+        if (eol == std::string::npos) { pos = mail.body.size(); break; }                //找不到了，退出循环
+        size_t len=eol-pos;     //这一条的长度
+        bool blank=true;
+        for(size_t i=0;i<len;++i){      //判断这一行是不是全为空
+            char c=mail.body[pos+i];
+            if(c!='\r' && c!='\n' && c!=' ' && c!='\t'){blank=false;break;}
+        }
+        if (!blank) break;      //遇到第一个非空行从这里开始
+        pos=eol+1;      //否则跳过这个空行
+    }
+
+    std::string content=mail.body.substr(pos);      //去掉开头空行的完整内容
+    //将内容里面的头部，from，to，suject拆出来
+    size_t sep = content.find("\r\n\r\n");      //标准协议需要在头部和正文之间加两个换行符
+    if (sep != std::string::npos) {
+        mail.headers = content.substr(0, sep);     // 空行之前是头部区
+        mail.text    = content.substr(sep + 4);    // 空行之后是正文
+    }
+
+    mail.headerFrom = getHeaderValue(mail.headers, "From");
+    mail.headerTo   = getHeaderValue(mail.headers, "To");
+    mail.subject    = getHeaderValue(mail.headers, "Subject");
+    mail.headerDate = getHeaderValue(mail.headers, "Date");
+}
+
+//处理头部文件
+
+std::string SmtpServer::getHeaderValue(const std::string& headers, const std::string& name) {
+    std::string value;
+    bool found = false;
+
+    std::istringstream iss(headers);   // 将它转换成一个逐行读的头部原文
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // 去掉行尾 \r
+        if (line.empty()) continue;
+
+        // 续行（以空格或 Tab 开头）：如果已经找到目标字段，把续行拼到值后面
+        if (line[0] == ' ' || line[0] == '\t') {
+            if (found) {
+                value += " " + line.substr(1);   // 去掉续行前的一个空白再拼接
+            }
+            continue;
+        }
+
+        // 本行是一个新字段：若目标字段上一行已找齐（值可能跨了多行），直接返回
+        if (found) return value;
+
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;   // 不是"字段名: 值"，跳过
+
+        std::string field = line.substr(0, colon);   // 冒号左边是字段名
+
+        // 大小写不敏感地比较字段名
+        bool match = (field.size() == name.size());
+        if (match) {
+            for (size_t i = 0; i < name.size(); ++i) {
+                if (toupper(field[i]) != toupper(name[i])) { match = false; break; }
+            }
+        }
+        if (!match) continue;
+
+        // 命中目标字段：取冒号后面的内容，去掉前导空格 / Tab
+        value = line.substr(colon + 1);
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+            value.erase(0, 1);
+        }
+        found = true;
+        // 先不返回：后面若还有续行，要继续拼到 value 上
+    }
+    return found ? value : "";
+}
+
+//主循环smtp对话
+
 void SmtpServer::handleClient(int client_fd) {
     // 发送服务就绪消息（220 是 SMTP 服务器可以开始接收命令的问候码）
     sendResponse(client_fd, "220 MyMailServer ESMTP ready");
@@ -257,19 +310,38 @@ void SmtpServer::handleClient(int client_fd) {
     close(client_fd);
 }
 
-// ============================================================================
-//  保存邮件到文件
-//  作用：把一封拼装好的邮件以 .eml 格式写到 ./mailbox 目录
-//  为什么是 .eml 格式：.eml 是标准邮件文件格式，
-//  可以用 Outlook、Foxmail 等客户端直接双击打开查看，方便调试和验证
-// ============================================================================
 void SmtpServer::saveMail(const SmtpMail& mail) {
     // 生成文件名：时间戳 + 随机数（以防并发冲突）
     // 因为服务器是多线程的，两个客户端可能同时发邮件，
     // 只用时间戳可能撞名，加上随机数（rand()）进一步降低冲突概率
     auto now = std::chrono::system_clock::now();
     auto ts = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    std::string filename = "./mailbox/" + std::to_string(ts) + "_" + std::to_string(rand()) + ".eml";
+
+    // ===================== 按收件人分目录投递（配合 POP3 多用户收信） =====================
+    // 邮件不再平铺在 ./mailbox/ 根目录，而是投到 ./mailbox/<收件人@前面的部分>/
+    // 例如 RCPT TO 是 bob@example.com → 存到 ./mailbox/bob/xxx.eml。
+    // 这样 POP3 服务器那边，用户 bob 登录后读 ./mailbox/bob/ 就是自己的邮件，
+    // 实现了 README 里要求的"每个用户独立邮箱目录 / 多邮箱账户隔离"。
+    std::string user = mail.to;                        // 信封收件人（RCPT TO 里的地址）
+    size_t atPos = user.find('@');                     // 取 @ 前面的"用户名"部分
+    if (atPos != std::string::npos) user = user.substr(0, atPos);
+
+    // 去掉可能残留的首尾空白，并统一转小写（和 Pop3Server 里的 normalizeUser 保持一致）
+    while (!user.empty() && (user.front() == ' ' || user.front() == '\t')) user.erase(0, 1);
+    while (!user.empty() && (user.back() == ' ' || user.back() == '\t')) user.pop_back();
+    for (auto& c : user) c = (char)tolower((unsigned char)c);
+
+    // 拼接保存目录：./mailbox/用户名 或（解析失败时兜底）./mailbox 根目录
+    std::string dir = "./mailbox";
+    if (!user.empty()) {
+        dir += "/" + user;
+        mkdir(dir.c_str(), 0755);   // 该用户的收件目录不存在就创建（已存在也无妨）
+    } else {
+        std::cerr << "[SMTP] 收件人地址无法解析出用户名（" << mail.to
+                  << "），邮件兜底保存到 ./mailbox/" << std::endl;
+    }
+
+    std::string filename = dir + "/" + std::to_string(ts) + "_" + std::to_string(rand()) + ".eml";
 
     // 以"写模式"打开文件（ofstream 默认是覆盖写）
     std::ofstream file(filename);
@@ -278,14 +350,52 @@ void SmtpServer::saveMail(const SmtpMail& mail) {
         return;
     }
 
-    // 简单重建邮件头部（可以按 RFC 格式丰富）
-    file << "From: " << mail.from << "\r\n";       // 发件人
-    file << "To: " << mail.to << "\r\n";           // 收件人
-    file << "Date: " << std::ctime(&ts);            // 发送时间（注意 ctime 自带换行）
-    file << "Subject: " << "(no subject)\r\n";     // 简单的占位标题
-    file << "\r\n";                                // 空行分隔头部和正文（邮件格式规定）
-    file << mail.body;                              // 正文已经包含换行
+    // ===================== 组装标准邮件（RFC 5322：头部区 + 空行 + 正文） =====================
+    // 头部区优先使用客户端在 DATA 阶段发来的原文（parseMailData() 拆出的 mail.headers），
+    // 里面已经包含客户端真正写的 From / To / Subject / Cc / Date 等头——原样保留，不再忽略。
+    // 如果客户端没写某个标准头（有些测试客户端只在 MAIL FROM / RCPT TO 里声明地址），
+    // 服务器再按信封信息（mail.from / mail.to）和当前时间补全，保证 .eml 能正常显示。
+    std::string header;   // 最终写进 .eml 的头部区
+
+    // 1) 先补缺失的标准头（按 Date → From → To → Subject 的常见顺序）
+    if (mail.headerDate.empty()) {
+        std::string dateStr = std::ctime(&ts);      // 例："Wed Sep  2 10:00:52 2026\n"
+        if (!dateStr.empty() && dateStr.back() == '\n') dateStr.pop_back();  // 去掉 ctime 自带的换行
+        header += "Date: " + dateStr + "\r\n";      // 统一用 CRLF
+    }
+    if (mail.headerFrom.empty()) {
+        header += "From: " + mail.from + "\r\n";    // 用 MAIL FROM 信封地址兜底
+    }
+    if (mail.headerTo.empty()) {
+        header += "To: " + mail.to + "\r\n";        // 用 RCPT TO 信封地址兜底
+    }
+    if (mail.subject.empty()) {
+        header += "Subject: (no subject)\r\n";      // 客户端没写主题时的占位
+    }
+
+    // 2) 再追加客户端在 DATA 里发的头部原文
+    //    （若客户端已写 From/To/Subject，上面的补全就不会执行，保证以客户端的为准）
+    header += mail.headers;
+
+    // 3) 确保头部区最后一行也以 \r\n 结尾
+    //    因为 header 里拼接的 mail.headers 可能不带行尾换行，
+    //    不补上的话，下面的空行分隔符会把"最后一行头"和空行混在一起，
+    //    导致邮件客户端认为头部没结束、正文被当成头部
+    if (!header.empty() &&
+        !(header.size() >= 2 && header.compare(header.size() - 2, 2, "\r\n") == 0)) {
+        header += "\r\n";
+    }
+
+    // 4) 输出：头部区 + 空行 + 正文
+    file << header;          // 头部区（每行末尾已带 \r\n）
+    file << "\r\n";          // 头部与正文之间的分隔空行（邮件格式规定）
+    file << mail.text;       // 正文（parseMailData() 从 DATA 原文中拆分出来的部分）
 
     file.close();   // 关闭文件，数据落盘
-    std::cout << "[SMTP] 邮件已保存: " << filename << std::endl;
+    std::cout << "[SMTP] 邮件已保存: " << filename;
+    if (!mail.subject.empty()) {
+        std::cout << " | 主题: " << mail.subject;   // 顺手打一下提取到的主题，便于调试
+    }
+    std::cout << std::endl;
 }
+

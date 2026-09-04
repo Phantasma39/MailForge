@@ -1,22 +1,3 @@
-// ============================================================================
-//  SmtpServer.h —— SMTP 服务器类（继承自 Server 基类）
-//
-//  作用：
-//    实现 SMTP（Simple Mail Transfer Protocol，简单邮件传输协议）的服务器端。
-//    SMTP 是互联网上"发邮件"的标准协议，本质上是一个基于 TCP 的文本协议：
-//      客户端发一行文本命令（HELO、MAIL FROM、RCPT TO、DATA、QUIT...）
-//      服务器回一行状态码（250、354、221...）
-//
-//  本类负责的部分（协议层）：
-//    - 接收客户端的命令
-//    - 解析命令并维护会话状态（状态机）
-//    - 按 SMTP 规范返回响应码
-//    - 把收到的邮件保存到本地文件
-//
-//  继承自 Server（网络层）：
-//    - TCP 连接的建立、accept、多线程由 Server 基类完成
-//    - 本类只需要重写 handleClient() 处理每个客户端连接即可
-// ============================================================================
 #ifndef SMTP_SERVER_H
 #define SMTP_SERVER_H
 
@@ -25,13 +6,24 @@
 #include <vector>
 
 // 用于存储一封邮件的临时结构
-// SMTP 发信是"分步进行"的：MAIL FROM（发件人）→ RCPT TO（收件人）→ DATA（正文），
+// SMTP 发信是"分步进行"的：MAIL FROM（发件人）→ RCPT TO（收件人）→ DATA（邮件内容），
 // 服务器必须把这几步的信息拼在一起，才能凑成完整的一封邮件，
 // 所以用一个结构体作为"会话状态"，跨命令共享
+// 注意：按 RFC 5321 / RFC 5322 的规定，DATA 内容本身就是一封完整的邮件
+// （头部区 + 空行 + 正文），所以下面的 body 字段存的是"完整邮件原文"，
+// DATA 结束后由 parseMailData() 负责把其中的标准头解析出来
 struct SmtpMail {
-    std::string from;   // 发件人地址（来自 MAIL FROM:<xxx>）
-    std::string to;     // 收件人地址（来自 RCPT TO:<xxx>）
-    std::string body;   // 邮件正文，包含头部和正文（DATA 阶段逐行积累）
+    std::string from;   // 信封发件人地址（来自 MAIL FROM:<xxx>）
+    std::string to;     // 信封收件人地址（来自 RCPT TO:<xxx>）
+    std::string body;   // DATA 阶段逐行收到的邮件原文（头部 + 空行 + 正文）
+
+    // ---- 下面这些字段在 DATA 结束时由 parseMailData() 解析填充 ----
+    std::string headers;    // 客户端在 DATA 里发的头部区原文（第一个空行之前，原样保留）
+    std::string text;       // 正文（第一个空行之后的部分）
+    std::string headerFrom; // 头部区中 From: 的值（客户端没写则为空）
+    std::string headerTo;   // 头部区中 To: 的值
+    std::string subject;    // 头部区中 Subject: 的值（客户端没写则为空）
+    std::string headerDate; // 头部区中 Date: 的值
 };
 
 class SmtpServer : public Server {
@@ -55,11 +47,24 @@ private:
     // mail     : 正在拼装的邮件，跨命令共享（是"会话状态"）
     // dataMode : 是否为 DATA 模式。用引用传递，因为函数内要修改它的值：
     //             普通模式下 line 是一条命令；DATA 模式下 line 是正文的一行
+
+    bool sendAll(int fd, const char* data, size_t len);
+
     bool processCommand(int fd, const std::string& line, SmtpMail& mail, bool& dataMode);
 
     // 发送响应行（给 response 补上 \r\n 后通过 socket 发出去）
     // SMTP 协议规定所有响应行必须以 \r\n 结尾，封装一层避免重复写
     void sendResponse(int fd, const std::string& response);
+
+    // 解析 DATA 阶段收齐的邮件原文（mail.body）
+    // 按 RFC 5322 邮件格式把原文拆成"头部(headers) + 正文(text)"，
+    // 并提取 From / To / Subject / Date 等标准头字段，
+    // 这样保存邮件时客户端真正写的这些头就不会被忽略
+    void parseMailData(SmtpMail& mail);
+
+    // 在头部原文中查找某个头字段（如 "From"、"Subject"）的值
+    // 字段名大小写不敏感（RFC 5322：字段名不区分大小写），找不到返回空串
+    std::string getHeaderValue(const std::string& headers, const std::string& name);
 
     // 保存邮件到文件（存储路径可配置，这里写死为 ./mailbox/）
     // 文件名用"时间戳_随机数.eml"，避免多线程并发时文件名冲突
