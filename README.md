@@ -22,6 +22,8 @@
 | 多用户隔离 | 每个账号独立的收件目录，互不可见 | ✅ 已实现 |
 | 账号管理 | 文本账号表 `users.txt`（`用户名:密码`，一行一个） | ✅ 已实现 |
 | 并发连接 | 每个客户端一个线程（`std::thread`） | ✅ 已实现 |
+| SMTP 客户端库 | `SmtpClient`：主动连 2525 发信（C++ 类） | ✅ 已实现 |
+| POP3 客户端库 | `Pop3Client`：主动连 1110 登录、收信、删信（C++ 类） | ✅ 已实现 |
 | 邮件加密 / Web 前端 | 尚未实现，属于后续里程碑 | ⏳ 规划中 |
 
 ## 2. 端口约定
@@ -71,11 +73,20 @@ MailForge/
 │   ├── include/
 │   │   ├── Server.h               # 网络基类 Server（纯虚函数 handleClient）
 │   │   ├── SmtpServer.h           # SMTP 服务器类 + SmtpMail 结构体
-│   │   └── Pop3Server.h           # POP3 服务器类 + Pop3Mail / Pop3State 结构体
+│   │   ├── Pop3Server.h           # POP3 服务器类 + Pop3Mail / Pop3State 结构体
+│   │   ├── SmtpClient.h           # SMTP 客户端类（主动发信）
+│   │   └── Pop3Client.h           # POP3 客户端类（主动收信）+ Pop3MailInfo 结构体
 │   ├── src/
 │   │   ├── Server.cpp             # Server 基类实现
 │   │   ├── SmtpServer.cpp         # SMTP 协议实现（状态机 + 落盘）
-│   │   └── Pop3Server.cpp         # POP3 协议实现（状态机 + 读目录 + 删除）
+│   │   ├── Pop3Server.cpp         # POP3 协议实现（状态机 + 读目录 + 删除）
+│   │   ├── SmtpClient.cpp         # SMTP 客户端实现
+│   │   └── Pop3Client.cpp         # POP3 客户端实现
+│   ├── client_test.cpp            # SMTP/POP3 客户端 演示 + 自测程序
+│   ├── build.sh                   # 一键编译服务器 ./mail_server
+│   ├── build_client.sh            # 一键编译客户端演示 ./mail_client_test
+│   ├── Makefile                   # make 构建脚本（需先安装 make，可选）
+│   ├── mail_client_test           # 客户端演示程序编译产物
 │   ├── users.txt                  # POP3 账号表（默认 bob/alice，密码 123456）
 │   ├── mailbox/                   # 邮件存储根目录（运行时自动创建）
 │   │   └── bob/                   # bob 的收件目录（内含 2 封测试邮件 *.eml）
@@ -794,10 +805,114 @@ Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦
 - [x] SMTP 协议（EHLO/MAIL FROM/RCPT TO/DATA/QUIT）
 - [x] POP3 协议（USER/PASS/STAT/LIST/RETR/DELE/QUIT）
 - [x] 多用户独立邮箱目录、EML 落盘持久化
-- [ ] SMTP 客户端 + POP3 客户端（C++，供 Web 后端调用）
+- [x] SMTP 客户端 + POP3 客户端（C++，供 Web 后端调用）
 - [ ] 邮件加密模块（≥2 种对称算法）
 - [ ] C++ HTTP 服务器 + Web 前端（B/S 架构收发界面）
 - [ ] 性能压测：100 次收发成功率 ≥ 99%
+
+---
+
+## 17. 代码详解 —— 协议客户端库（`MailServer/include/SmtpClient.h` + `src/SmtpClient.cpp`、`MailServer/include/Pop3Client.h` + `src/Pop3Client.cpp`）
+
+> 和服务端"角色对调"的代码：服务端等着别人连上来，**客户端主动连上去**。
+> 将来 Web 后端就靠这两个类完成"网页按钮 → 真发信/真收信"。可执行演示在 `client_test.cpp`。
+
+### 17.1 `class SmtpClient` 类总览
+
+| 类型 | 成员 | 说明 |
+|---|---|---|
+| 私有成员 | `int sockFd_` | 与服务端通信的 socket（-1 = 未连接） |
+| 私有成员 | `std::string server_` | 服务器地址（默认 `127.0.0.1`） |
+| 私有成员 | `int port_` | 服务器端口（默认 `2525`） |
+| 私有成员 | `std::string lastError_` | 最近一次错误描述（`getLastError()` 返回它） |
+| 公开 | `SmtpClient()` | 构造 1：默认连 `127.0.0.1:2525` |
+| 公开 | `SmtpClient(server, port)` | 构造 2：指定服务器与端口 |
+| 公开 | `~SmtpClient()` | 析构：自动关闭 socket |
+| 公开 | `bool sendMail(from, to, subject, body)` | ★ 核心：发一封邮件 |
+| 公开 | `void close()` | 主动关闭连接（幂等） |
+| 公开 | `std::string getLastError()` | 返回最近错误信息 |
+| 私有 | `bool connectServer()` | 建连 + 5 秒收发超时 |
+| 私有 | `bool sendLine(line)` | 发一行命令（补 `\r\n`，循环发完） |
+| 私有 | `bool recvLine(line&)` | 读一行响应（去行尾 `\r\n`，超长丢弃） |
+| 私有 | `bool waitReply(code)` | 等指定状态码，自动跳过 `250-` 多行响应 |
+| 私有 | `bool sendData(from,to,subject,body)` | 逐行发送头部+正文（正文做点填充）并结束 |
+
+**各函数输入/输出说明：**
+
+| 函数 | 输入参数 | 返回值 | 说明 |
+|---|---|---|---|
+| `SmtpClient(server, port)` | `server` 地址字符串；`port` 端口号 | 无 | 只保存参数，真正建连在 `sendMail` 里 |
+| `sendMail(from,to,subject,body)` | `from` 发件人（如 `alice@example.com`）；`to` 收件人；`subject` 主题（支持 UTF-8 中文）；`body` 正文（按行自动做点填充） | `true`=服务器已接受（收到 250）；`false`=任一步失败，用 `getLastError()` 查原因 | 内部依次完成：建连→等220→`EHLO`→等250→`MAIL FROM:<from>`→等250→`RCPT TO:<to>`→等250→`DATA`→等354→发内容→等250→`QUIT`→等221→断开 |
+| `sendData(...)` | 同上四段文本 | `true/false` | 发送 `From/To/Subject` 三个头 + 空行 + 正文每一行；正文中 `.` 开头行补成 `..`；最后发单独 `.` |
+| `waitReply(code)` | `code` 期望状态码（220/250/354/221） | `true`=收到该码；`false`=收到其它码或读失败 | 服务器可能回 `250-xxx` 多行，会一直读到 `250 xxx` 才判定 |
+| `sendLine(line)` / `recvLine(line&)` | `line` 命令/出参响应行 | `true/false` | 分别补/去 `\r\n`；`recvLine` 单字节循环读，遇到读超时（5 秒）或连接关闭会失败 |
+| `getLastError()` | 无 | `std::string` | 中文错误描述，便于打日志排查 |
+
+### 17.2 `struct Pop3MailInfo` 结构体
+
+`LIST` 命令结果里"一封邮件"的信息：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `number` | `int` | 消息编号（1 起，本会话内固定） |
+| `size` | `long long` | 邮件字节数 |
+
+
+
+### 17.3 `class Pop3Client` 类总览
+
+| 类型 | 成员 | 说明 |
+|---|---|---|
+| 私有成员 | `int sockFd_` | socket（-1 = 未连接） |
+| 私有成员 | `std::string server_` / `int port_` | 服务器地址 / 端口（默认 `127.0.0.1:1110`） |
+| 私有成员 | `std::string lastError_` | 最近一次错误描述 |
+| 公开 | `Pop3Client()` / `Pop3Client(server, port)` | 构造：默认连本机 1110，或指定服务器 |
+| 公开 | `~Pop3Client()` | 析构自动关 socket（没发 QUIT 则 DELE 不生效，符合协议） |
+| 公开 | `bool login(user, pass)` | ★ 登录：未连接则建连，然后 `USER + PASS` |
+| 公开 | `bool stat(count&, totalBytes&)` | `STAT`：邮件数与总字节 |
+| 公开 | `bool list(mails&)` | `LIST`：拉取 `Pop3MailInfo` 列表 |
+| 公开 | `bool retr(number, rawMail&)` | `RETR`：下载第 number 封完整原文 |
+| 公开 | `bool dele(number)` | `DELE`：标记删除（QUIT 才真删） |
+| 公开 | `bool rset()` / `noop()` | `RSET` 反悔 / `NOOP` 保活 |
+| 公开 | `bool quit()` | `QUIT`：真正删除被标记的邮件并断开 |
+| 公开 | `void close()` | 只关 socket（不断言 QUIT） |
+| 公开 | `std::string getLastError()` | 最近错误信息 |
+| 私有 | `connectServer / sendLine / recvLine` | 同 SmtpClient 的底层收发 |
+| 私有 | `bool readReply(replyLine&)` | 读一行并判断 `+OK` 开头 |
+| 私有 | `bool readMultiLines(lines&)` | 读多行直到 `.`，自动还原点填充（`..`→`.`） |
+| 私有(static) | `bool parseTwoNumbers(reply, a&, b&)` | 从 `+OK N bytes` 里解析两个数字 |
+
+**各函数输入/输出说明：**
+
+| 函数 | 输入参数 | 返回值 | 说明 |
+|---|---|---|---|
+| `login(user, pass)` | `user` 用户名（支持 `bob` / `bob@example.com`）；`pass` 密码 | `true`=进入事务态；`false`=服务器回 `-ERR` 或连接失败 | 未连接时自动建连并读掉 `+OK` 问候 |
+| `stat(count, totalBytes)` | `count`、`totalBytes`（引用出参） | `true/false` | 解析 `+OK N bytes` 写入两个出参 |
+| `list(mails)` | `mails`（引用出参，先清空） | `true/false` | 首行 `+OK ...`，后续每行 `编号 大小`，读到 `.` 结束 |
+| `retr(number, rawMail)` | `number` 消息编号；`rawMail`（出参） | `true/false` | 先 `+OK N octets`，再收多行到 `.`；行间用 `\n` 拼回完整原文 |
+| `dele(number)` | `number` | `true/false` | 只是打标记 |
+| `quit()` | 无 | `true/false` | 发 `QUIT`，等 `+OK`，关 socket |
+
+### 17.4 客户端演示程序 `client_test.cpp`
+
+把两个客户端串起来做"一次完整的收发 + 删 + 验证"：
+
+| 步骤 | 用的类 | 做了什么 |
+|---|---|---|
+| 1 | `SmtpClient` | `alice@example.com` → `bob@example.com` 发一封中文邮件（正文故意带 `.` 开头行） |
+| 2 | `Pop3Client` | `bob/123456` 登录 → `STAT` → `LIST` |
+| 3 | `Pop3Client` | `RETR` 最新一封，打印原文，校验主题/正文/点开头行是否完整还原 |
+| 4 | `Pop3Client` | `DELE` 刚收的那封 → `QUIT` → 重新连接 `STAT` 验证数量回落（自清理，可反复运行） |
+| 5 | `Pop3Client` | 故意用错误密码登录，演示失败路径与报错信息 |
+
+### 17.5 运行客户端演示
+
+```bash
+cd MailServer
+./mail_server &              # ① 先启动服务器（2525 + 1110）
+bash build_client.sh         # ② 编译客户端演示程序
+./mail_client_test           # ③ 跑「SMTP发 → POP3收 → 删 → 验证」
+```
 
 ---
 
