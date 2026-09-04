@@ -1,566 +1,805 @@
-# MailForge 📧
+# MailForge —— 邮件服务器（C/C++ 原生实现 SMTP + POP3）
 
-> 计算机与网络课程设计 —— 邮件协议实现及应用系统研制（**C/C++**）
-> 选题序号 **18** ｜ 难度系数 **1.0** ｜ B/S 架构 ｜ C++ 原生实现
+> 计算机与网络课程设计 —— 邮件协议实现及应用系统研制
+> 选题序号 **18** ｜ 难度系数 **1.0**
 
-**MailForge** 是一个用 **C/C++ 从零实现**的电子邮件系统：不依赖任何第三方库，
-基于 **Socket 编程**原生实现 **SMTP（RFC 5321）与 POP3（RFC 1939）协议**，并内置
-**≥2 种加密算法**对邮件内容进行端到端加密。系统通过浏览器即可完成邮件
-注册、登录、收发、阅读全流程，前后端由 C++ 自研 HTTP 服务器承载。
+**MailForge** 是一个用 **C/C++ 从零编写**的邮件服务器，**不依赖任何第三方库**：
+基于原生 **Socket 编程**实现了 **SMTP（RFC 5321）发送**与 **POP3（RFC 1939）收取**两大标准协议，
+并支持**多用户邮箱隔离**（每个用户一个独立收件目录，邮件以标准 `.eml` 格式落盘，服务器重启不丢失）。
 
-## ✨ 功能特性
+> 本文档依据仓库里**当前实际存在的代码**编写，逐文件、逐函数、逐结构体地说明
+> 「输入参数 / 返回值 / 作用 / 注意事项」，方便复习、答辩与后续扩展。
 
-- ✅ **SMTP 服务端 / 客户端**：完整实现 HELO/EHLO、MAIL、RCPT、DATA、QUIT 等命令，支持中文标题与正文、附件传输
-- ✅ **POP3 服务端 / 客户端**：完整实现 USER、PASS、STAT、LIST、RETR、DELE、QUIT 等命令，支持多邮箱账户隔离
-- ✅ **邮件内容加密（提升项）**：内置 ≥2 种对称加密算法（AES-CBC / RC4 / XOR），发送加密、接收解密，密钥可配置
-- ✅ **B/S 架构**：C++ 手写 HTTP/1.1 服务器（GET/POST 解析 + REST 路由），前端为原生 HTML/CSS/JS
-- ✅ **多用户支持**：每个用户独立邮箱目录，邮件以 EML 格式落盘，服务重启不丢失
-- ✅ **跨平台**：Socket 层条件编译，兼容 Windows（Winsock）与 Linux/macOS（POSIX）
-- ✅ **性能达标**：1MB 以内邮件平均收发时延 < 2s；连续 100 次收发测试成功率 ≥ 99%
+---
 
-## 🛤️ 技术路线
+## 1. 当前项目能做什么
 
-```
-┌──────────────── 前端：Web 邮箱界面（HTML/CSS/JS）─────────────────┐
-│        登录 │ 收件箱 │ 写邮件 │ 发件箱 │ 邮件详情 │ 退出             │
-└───────────────────────────▲─────────────────────────────────────┘
-                            │ HTTP/1.1
-┌───────────────────────────▼─────────────────────────────────────┐
-│            C++ HTTP 服务器（手写，多线程，静态资源 + REST 路由）      │
-│            用户管理 / 会话校验 / 邮件列表 / 邮件解密展示              │
-└───────┬───────────────────────────────┬─────────────────────────┘
-        │ 明文邮件（内部）                │ 加密后邮件（网络传输）
-┌───────▼────────────────┐   ┌──────────▼─────────────────────────┐
-│ SMTP 服务器（25/1025 端口）│   │ SMTP 客户端 → 对端 SMTP 服务器        │
-│ POP3 服务器（110/1110 端口）│◄─►│ POP3 客户端 ← 本机 POP3 服务器        │
-│ 协议状态机（RFC 5321/1939）│   │ 加密：AES-CBC / RC4 / XOR（≥2种）   │
-└───────┬────────────────┘   └──────────┬─────────────────────────┘
-        └───────────────┬────────────────┘
-┌───────────────────────▼─────────────────────────────────────────┐
-│         邮件存储层：data/<user>/  收件(eml) + 发件(eml) 落盘        │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-| 模块 | 文件 | 说明 |
+| 能力 | 说明 | 状态 |
 |---|---|---|
-| Socket 封装 | `src/net/socket.hpp` | Winsock / POSIX 条件编译，跨平台 |
-| SMTP 协议 | `src/smtp/smtp_server.*` | RFC 5321 命令状态机，`std::thread` 并发处理连接 |
-| POP3 协议 | `src/pop3/pop3_server.*` | RFC 1939 命令状态机，账户密码校验 |
-| 邮件客户端 | `src/mail/mail_client.*` | SMTP/POP3 客户端，用于系统互发与自动化测试 |
-| 加密模块 | `src/crypto/crypto.*` | ≥2 种加密算法（AES-CBC / RC4 / XOR），支持密钥派生 |
-| 存储模块 | `src/store/storage.*` | 邮箱目录管理、EML 邮件读写 |
-| Web 后端 | `src/web/http_server.*` | 手写 HTTP/1.1 服务器 + REST 路由 |
-| 前端 | `web/` | HTML / CSS / JS 原生页面 |
+| SMTP 发信 | 完整交互：`HELO/EHLO → MAIL FROM → RCPT TO → DATA → QUIT` | ✅ 已实现 |
+| 邮件落盘 | 按**收件人**自动投递到 `./mailbox/<用户名>/`，存为 `.eml` | ✅ 已实现 |
+| POP3 收信 | 完整交互：`USER/PASS` 认证 + `STAT/LIST/RETR/DELE/RSET/NOOP/QUIT` | ✅ 已实现 |
+| 多用户隔离 | 每个账号独立的收件目录，互不可见 | ✅ 已实现 |
+| 账号管理 | 文本账号表 `users.txt`（`用户名:密码`，一行一个） | ✅ 已实现 |
+| 并发连接 | 每个客户端一个线程（`std::thread`） | ✅ 已实现 |
+| 邮件加密 / Web 前端 | 尚未实现，属于后续里程碑 | ⏳ 规划中 |
 
-## 🎓 学习路线（零基础 → 答辩）
+## 2. 端口约定
 
-> 假设你目前对计算机网络"一点都不懂"。下面按顺序学即可，每个阶段都写明了**要懂什么**、**为什么需要**、**怎么验证学会了**。全部学完，你不仅能完成本项目，还能从容应对答辩提问。
-
-### 总体路线图
-
-```
-第1-2周        第3-4周         第5-6周          第7-9周        第10-11周     第12周
-┌─────────┐   ┌───────────┐  ┌─────────────┐  ┌────────────┐  ┌──────────┐  ┌────────┐
-│ ① 基础   │ → │ ② 网络与   │ → │ ③ 邮件协议   │ → │ ④ C++ 项目  │ → │ ⑤ 测试与  │ → │ ⑥ 答辩  │
-│ C++/编码 │   │ Socket    │  │ SMTP/POP3  │  │ 实现 M1-M5  │  │ 性能优化  │  │ 材料   │
-└─────────┘   └───────────┘  └─────────────┘  └────────────┘  └──────────┘  └────────┘
-```
-
----
-
-### ① 基础知识（第 1-2 周）
-
-**目标**：能写一个"读文件、处理字符串"的小 C++ 程序。
-
-#### 1.1 必懂概念
-
-- **位与字节**：1 字节 = 8 位（bit），网络传输的最小单位是**字节**。1KB=1024 字节，1MB=1024KB。
-- **字符编码**：计算机只存数字，字符必须按编码表转成数字。
-  - **ASCII**：7 位编码，覆盖英文、数字、常见符号。
-  - **UTF-8**：兼容 ASCII，用 1~4 字节表示全世界文字，**邮件正文用它**。
-  - **Base64**：把"二进制数据"（加密密文、图片）转成可见 ASCII 字符，每 3 字节 → 4 个字符。**邮件里传输加密内容必用**，因为文本协议不允许出现乱码二进制。
-- **进程与线程**：运行中的程序叫进程；进程内可开多个线程同时干活。**邮件服务器必须为每个客户端连接开一个线程**，否则一个客户端卡住，其他人全部等待。
-
-#### 1.2 C++ 必须会的基础
-
-| 语法 | 在本项目中的用途 |
-|---|---|
-| 变量、`int`/`long` | 存端口号、状态码、邮件字节数 |
-| `std::string` | 读一行协议命令、拼装邮件文本 |
-| `std::vector` | 存收件人列表、邮件编号列表 |
-| 函数 | 封装"读一行 / 发一行 / 加密"等操作 |
-| 类（class） | 定义 `Socket`、`SmtpSession`、`Mail` 等类 |
-| 文件流 `fstream` | 把邮件写入磁盘、再读出来 |
-| 线程 `std::thread` | 每个客户端连接开一个线程 |
-| 异常 `try/catch` | 网络断开时不崩溃，捕获错误 |
-
-> **验证方式**：写程序读 `hello.txt`，按行输出并统计字节数。跑通即进入下一阶段。
-
----
-
-### ② 网络与 Socket（第 3-4 周）
-
-**目标**：自己写出"客户端发一行、服务器回一行"的程序。
-
-#### 2.1 TCP/IP 四层模型（必须记住）
-
-| 层次 | 名称 | 管什么 | 本项目对应 |
+| 服务 | 标准端口 | 本项目使用 | 原因 |
 |---|---|---|---|
-| 第 4 层 | 应用层 | 数据"是什么意思" | SMTP / POP3 / HTTP |
-| 第 3 层 | 传输层 | 端到端可靠传输 | **TCP** |
-| 第 2 层 | 网络层 | 找到对方机器 | IP 地址 |
-| 第 1 层 | 链路层 | 物理传输 | 网卡、网线 |
+| SMTP（发信） | 25 | **2525** | 25 需要 root 权限且常被防火墙拦截；2525 是高端口，普通用户可直接监听 |
+| POP3（收信） | 110 | **1110** | 同上，110 也需要 root 权限 |
 
-> **一句话结论**：SMTP、POP3、HTTP 都是**应用层协议**，全部构建在 TCP 之上。本项目核心就是——**用 TCP Socket 收发文本行，再按协议格式说话**，不需要自己实现 TCP。
+> 用 telnet / 邮件客户端 / Python 测试时，端口填 **2525 / 1110**。
 
-### 🎯 核心结论（写给答辩用）
-> “在本项目中，**传输层及以下**（TCP/IP路由、差错重传），我没有重复造轮子，而是直接调用了操作系统提供的 **Socket API**，由内核保证数据的**端到端可靠传输**。  
-> 我的主要工作集中在 **应用层**，即在可靠的传输通道之上，严格按照 RFC 文档定义的 SMTP/POP3 指令集，封装和解析邮件数据，并在此层融入了多重加密逻辑。”
-
----
-
-## 2. 写代码时，你实际在调用什么？（伪代码解构）
-
-**大实话：你根本不用管底下三层！** 在 C/C++ 里，你只需要调用操作系统提供的 `socket`、`connect`、`send`、`recv` 这几个函数。剩下的底层工作（TCP握手、IP寻址、网卡发送）全由 **Windows/Linux 内核**自动完成。
-
-以下是**邮件发送核心伪代码**，注意观察“你的代码”和“系统底层”的分界线：
-
-```cpp
-// ==========================================
-// 你的代码只在这！(应用层)
-// ==========================================
-
-// 1. 创建一个“快递箱编号”（创建 Socket）
-// AF_INET = IPv4地址，SOCK_STREAM = 使用TCP协议
-int client_socket = socket(AF_INET, SOCK_STREAM, 0); 
-
-// 2. 填写收件人地址（目标邮件服务器IP和端口）
-server_addr.sin_port = 465;          // QQ邮箱的SMTP端口
-server_addr.sin_addr = "smtp.qq.com 的 IP";
-
-// ==========================================
-// ！！！关键分界线！！！
-// 以下 connect() 是系统调用，底层三层瞬间全自动跑通！
-// ==========================================
-
-// 3. connect() 触发底层三层工作：
-//    ① 传输层(TCP)：自动三次握手
-//    ② 网络层(IP)：自动封装路由
-//    ③ 链路层(网卡)：自动发信号
-connect(client_socket, server_addr); 
-
-// 如果你能执行到这里，说明底层网络连接已成功！
-// 接下来，你的代码只负责应用层“拼字符串”和“发字符串”！
-
-// ==========================================
-// 纯应用层操作 (SMTP 协议)
-// ==========================================
-
-// 4. 发送字符串（系统底层只负责把这些字节可靠地送过去）
-send(client_socket, "EHLO 我的电脑\r\n");
-send(client_socket, "MAIL FROM: <me@qq.com>\r\n");
-send(client_socket, "RCPT TO: <you@163.com>\r\n");
-send(client_socket, "DATA\r\n");
-send(client_socket, "Subject: 你好\r\n\r\n今天天气不错\r\n.\r\n");
-
-// 5. 接收回复（系统底层把收到的电信号转成字符串给你）
-char reply[1024];
-recv(client_socket, reply);
-printf("服务器说：%s", reply); // 输出: 250 OK
-
-// 6. 关闭连接
-close(client_socket);
-
-#### 2.2 端口号
-
-一台电脑同时跑很多服务，用**端口号（0~65535）**区分。惯例：SMTP=25、POP3=110、HTTP=80。本项目为免管理员权限，测试用 **1025 / 1110 / 8080**。
-
-#### 2.3 Socket 是什么？
-
-一句话：**Socket 是操作系统提供的"网络水管"**，你往里写字节，对方从另一头读字节。
-
-- 服务器：`socket() → bind() → listen() → accept()`（等待连接）
-- 客户端：`socket() → connect()`（主动连接）
-- 建连后双方 `send() / recv()` 收发数据，用完 `close()` 关闭
-
-#### 2.4 TCP 三次握手（了解即可）
-
-建连确认流程（SYN → SYN+ACK → ACK）。操作系统替你完成，**无需实现**；但要记住：`recv()` 返回 0 或负数表示连接已断开。
-
-#### 2.5 本阶段验证
-
-写"回声服务器"：客户端发一行字，服务器原样返回。这就是未来 SMTP/POP3 服务器的雏形。
-
-### ③ 邮件系统与协议（第 5-6 周）★ 核心
-
-**目标**：能完整说出"一封邮件从发出到收取经过哪些环节、每一句对话什么意思"。
-
-#### 3.1 邮件系统是怎么运转的？
+## 3. 架构总览
 
 ```
-发件人客户端(MUA) ──SMTP──▶ 发件方邮件服务器(MTA) ──SMTP──▶ 收件方邮件服务器(MTA)
-                                                            │ 收件时用 POP3
-                                                    收件人客户端(MUA)◀─┘
+                    ┌───────────────────────────────────────────────┐
+   SMTP 客户端 ────► │  MailServer（本仓库 MailServer/ 目录）            │
+   (Outlook/python)  │                                               │
+                    │   main.cpp                                     │
+                    │     ├── std::thread ──► Pop3Server::start()    │
+                    │     └── 主线程      ──► SmtpServer::start()    │
+                    │                                               │
+                    │   ┌────────────────────────────────────────┐   │
+                    │   │ Server（基类：socket→bind→listen→accept） │   │
+                    │   │     每来一个连接开线程调 handleClient()     │   │
+                    │   └───────────────▲──────────────▲──────────┘   │
+                    │                   │              │              │
+                    │         SmtpServer（2525）  Pop3Server（1110）   │
+                    │         processCommand     processCommand      │
+                    └───────────────────┼──────────────┼──────────────┘
+                                        ▼              ▼
+                                    ./mailbox/<用户名>/xxx.eml
+                                       （SMTP 写入 / POP3 读取）
 ```
 
-- **MUA**（Mail User Agent）：邮件客户端（网页邮箱、Outlook）。
-- **MTA**（Mail Transfer Agent）：邮件服务器，负责转发与存储（qmail、postfix 等）。
-- 本项目要做：**MTA（SMTP 服务器 + POP3 服务器）** + **MUA（Web 邮箱前端）**。
-
-#### 3.2 一封邮件长什么样？（RFC 5322 邮件格式）
-
-邮件 = **头部** + 空行 + **正文**：
-
-```
-From: alice@example.com                        ← 头部字段，每行格式"字段名: 值"
-To: bob@example.com
-Subject: 你好
-Date: Mon, 31 Aug 2026 10:00:00 +0800
-                                               ← 头部与正文之间必须有 1 个空行
-你好，这是正文内容。
-```
-
-- 关键字段：`From`、`To`、`Cc`、`Subject`、`Date`。
-- 附件与二进制（加密密文）用 **MIME** 扩展：`Content-Type: multipart/mixed; boundary=xxx`，用 boundary 分隔多段内容。我们可用简单方案：正文加密后用 Base64 塞进自定义字段。
-
-#### 3.3 SMTP 协议详解（RFC 5321）★ 必考
-
-**作用**：把邮件从发件人传到邮件服务器（或服务器之间转发）。
-**端口**：25（标准）/ 1025（本项目测试）。
-**本质**：TCP 上的**文本问答**——客户端发命令（一行），服务器回"3 位状态码 + 说明"。
-
-**客户端命令**（SMTP 客户端要会发）：
-
-| 命令 | 含义 | 示例 |
-|---|---|---|
-| HELO / EHLO | 打招呼并报身份 | `EHLO mail.example.com` |
-| MAIL FROM | 声明发件人 | `MAIL FROM:<alice@example.com>` |
-| RCPT TO | 声明收件人（可多个） | `RCPT TO:<bob@example.com>` |
-| DATA | 开始发送邮件内容 | `DATA` |
-| RSET | 重置本次会话 | `RSET` |
-| NOOP | 心跳探测 | `NOOP` |
-| QUIT | 结束会话 | `QUIT` |
-
-**服务器状态码**（SMTP 服务器要会回复）：
-
-| 状态码 | 含义 | 触发时机 |
-|---|---|---|
-| 220 | 服务就绪 | 客户端一连接上 |
-| 250 | 请求成功 | MAIL / RCPT 成功 |
-| 354 | 可以开始发内容 | 收到 DATA 之后 |
-| 221 | 正在关闭连接 | 收到 QUIT 之后 |
-| 421 | 服务不可用 | 服务器过载等 |
-| 450 / 550 | 收件人问题 / 拒收 | RCPT 失败 |
-| 500 / 502 | 命令错误 / 不支持 | 命令不识别 |
-
-**一次完整 SMTP 会话（答辩必背）**：
-
-```
-C 连上服务器
-S: 220 localhost MailForge SMTP ready              ← 服务器先打招呼
-C: EHLO mail.example.com
-S: 250-localhost                                   ← 多行回复：250-开头表示还有后续行
-S: 250 OK
-C: MAIL FROM:<alice@example.com>
-S: 250 OK
-C: RCPT TO:<bob@example.com>
-S: 250 OK
-C: DATA
-S: 354 End data with <CR><LF>.<CR><LF>             ← 通知客户端"用单独一行的点结束"
-C: From: alice@example.com
-C: To: bob@example.com
-C: Subject: hello
-C:
-C: Hello Bob!
-C: .                                               ← 单独一个点 + 回车换行 = 内容结束
-S: 250 OK message accepted
-C: QUIT
-S: 221 Bye
-```
-
-> **两个易错点**：① 行尾是 `\r\n`（CRLF），不是 `\n`；② 邮件内容若某行以 `.` 开头，要改成 `..`（透明性规则），`.\r\n` 单独成行表示结束。
-
-#### 3.4 POP3 协议详解（RFC 1939）★ 必考
-
-**作用**：收件人客户端把邮件从服务器"取下来"。
-**端口**：110（标准）/ 1110（本项目测试）。
-**本质**：同样是 TCP 文本问答，但回复以 **`+OK`** 或 **`-ERR`** 开头。
-
-**客户端命令**：
-
-| 命令 | 含义 | 示例 |
-|---|---|---|
-| USER | 提交用户名 | `USER alice` |
-| PASS | 提交密码 | `PASS 123456` |
-| STAT | 邮箱统计（封数、总字节数） | `STAT` |
-| LIST | 列出每封邮件的编号与大小 | `LIST` |
-| RETR | 取回第 n 封邮件 | `RETR 1` |
-| DELE | 标记删除第 n 封 | `DELE 1` |
-| RSET | 取消删除标记 | `RSET` |
-| NOOP | 心跳 | `NOOP` |
-| QUIT | 退出，删除标记的邮件 | `QUIT` |
-
-**三种状态**：**认证状态**（输入 USER/PASS）→ **事务状态**（STAT/LIST/RETR/DELE）→ **更新状态**（QUIT 时真正删除）。
-
-**一次完整 POP3 会话**：
-
-```
-C 连上服务器
-S: +OK MailForge POP3 server ready
-C: USER alice
-S: +OK
-C: PASS 123456
-S: +OK alice has 2 messages
-C: STAT
-S: +OK 2 3456                       ← 2 封邮件，共 3456 字节
-C: LIST
-S: +OK 2 messages
-S: 1 1200                           ← 第 1 封，1200 字节
-S: 2 2256                           ← 第 2 封，2256 字节
-S: .                                ← 列表结束（同样用单独一个点）
-C: RETR 1
-S: +OK 1200 octets
-S: Received: from ...
-S: From: bob@example.com
-S: Subject: hi
-S:                                  ← 空行
-S: 邮件正文……
-S: .                                ← 邮件内容结束
-C: DELE 1
-S: +OK message 1 deleted
-C: QUIT
-S: +OK byebye
-```
-
-#### 3.5 IMAP 是什么？（了解即可）
-
-POP3 把邮件下载到本地（断网也能看）；IMAP 在服务器端管理邮件（多设备同步）。**课程只要求 SMTP + POP3**，IMAP 答辩时能说清区别即可。
-
-### ④ HTTP 与 Web（第 6 周）
-
-**为什么需要 HTTP**：浏览器不认识 SMTP/POP3，需要你的 C++ 服务器开一个"翻译"接口。
-
-- **HTTP 请求**：第一行是 `方法 路径 版本`，例如 `GET /inbox HTTP/1.1`、`POST /send`；后面是请求头、空行、请求体（表单数据）。
-- **HTTP 响应**：`HTTP/1.1 200 OK` + 响应头 + 空行 + 正文（HTML 文本）。
-- **本项目分工**：
-  - 浏览器点"发信"→ `POST /send`（带上收件人、主题、正文）
-  - C++ HTTP 服务器收到后，内部调用**自己写的 SMTP 客户端**发信
-  - 浏览器点"收信"→ `GET /inbox` → 服务器内部调用**自己写的 POP3 客户端**收信 → 拼成 HTML 返回
-- 你只需要解析 GET/POST、返回静态 HTML，不需要实现完整 HTTP 规范。
-
-> **验证**：写一个最小 HTTP 服务器，浏览器能打开你返回的 "Hello MailForge" 页面。
-
----
-
-### ⑤ 加密基础（第 6-7 周）★ 提升项
-
-**课程要求"加密算法不少于 2 种"，做满可拿到完成系数 1.0。**
-
-- **对称加密**：加密、解密用**同一把密钥**。速度快，适合加密整封邮件。AES、RC4、XOR 都是对称加密。
-  - **AES**：现代标准，安全性高（128/256 位密钥，CBC 模式需要 16 字节 IV 向量）。
-  - **RC4**：流密码，实现简单，逐字节异或密钥流。
-  - **XOR**：最简单，"明文 XOR 密钥 = 密文"，适合作为最朴素的演示算法。
-- **Base64**：密文是二进制，不能直接放进文本邮件，需要 Base64 编码后再写入邮件；收到时先 Base64 解码，再解密。
-- **密钥从哪来**：写死一份配置文件，或由用户口令通过 **KDF（如多次哈希）** 派生。
-- **本项目加密链路**：
-  ```
-  发信：正文(UTF-8) → [AES-CBC 或 RC4 加密] → 密文 → [Base64] → 邮件正文
-  收信：邮件正文 → [Base64 解码] → 密文 → [对应算法解密] → 原正文
-  ```
-
-> **验证**：写一个测试：同一明文用两种算法加密 → 解密 → 与原文逐字节一致；加密结果用肉眼无法辨认。
-
----
-
-### ⑥ C++ 项目实现（第 7-9 周）
-
-按里程碑推进（每个里程碑都"能运行、能演示"）：
-
-| 里程碑 | 周次 | 交付内容 | 完成标准 |
-|---|---|---|---|
-| M1 | 第 7 周 | Socket 封装 + **SMTP 服务器** | telnet 手动发信成功，邮件落盘 |
-| M2 | 第 8 周 | **POP3 服务器** + SMTP 客户端 | 自己发的信能自己取回 |
-| M3 | 第 8-9 周 | **加密模块**接入 | 传输的邮件是密文，收信端能解密 |
-| M4 | 第 9 周 | **HTTP 服务器 + Web 前端** | 浏览器完成注册/发信/收信 |
-| M5 | 第 9-10 周 | 并发与**性能优化** | 达标 2s / 99% |
-
-> 每完成一个里程碑就 `git commit` 一次，答辩时这就是清晰的开发轨迹。
-
----
-
-### ⑦ 测试与性能（第 10 周）
-
-- **协议功能测试**：脚本模拟完整 SMTP/POP3 会话，校验每个状态码。
-- **加密正确性测试**：多算法"加密→解密→比对原文"。
-- **性能压测**：
-  - 循环 100 次"发信+收信"，统计成功率（要求 ≥ 99%）
-  - 构造 1MB 邮件的正文，测平均收发时延（要求 < 2s）
-- **常见优化点**：连接复用、减少磁盘同步（`fflush`/缓存）、预分配缓冲区、线程池。
-
-> **达标口径**：把测试脚本的统计结果截图，答辩和报告里直接引用。
-
----
-
-### ⑧ 答辩（第 11-12 周）
-
-- 准备 **PPT**：选题背景 → 系统架构 → 协议实现细节 → 加密方案 → 性能数据 → 演示。
-- **现场演示**：注册两个账号 → 互相发加密邮件 → 用抓包（如 Wireshark）证明传输的是密文 → 收信解密成功。
-- **大概率被问的问题**：
-  - SMTP 的 220/250/354/221 分别代表什么？
-  - 为什么邮件内容结束要一个单独的点？行首点如何转义？
-  - POP3 的 `+OK`/`-ERR` 与 SMTP 状态码有什么区别？
-  - 加密用的密钥如何管理？换一种算法怎么接入？
-  - 100 次收发怎么测的？时延测的是哪一段？
-
----
-
-## 🚀 构建与运行
-
-### 环境要求
-
-| 平台 | 工具链 |
-|---|---|
-| Windows | MinGW-w64 g++ 8+ 或 MSVC（本机：MinGW GCC 6.3.0，使用 C++11/14 特性） |
-| Linux / macOS | g++ / clang++，依赖 POSIX Socket |
-
-### 编译与启动
-
-> 📌 **当前进度：里程碑 1 前置 —— HTTP 连通性验证（`src/server.cpp`）**
->
-> ```bash
-> # 进入源码目录，编译并启动服务器（监听 8888 端口）
-> cd src && g++ -o server server.cpp && ./server
->
-> # 浏览器访问 http://localhost:8888，看到页面即成功
-> ```
-
-**目标架构（后续里程碑逐步实现）：**
-
-```bash
-# 编译全部目标
-make
-
-# 一键启动（SMTP:1025 + POP3:1110 + Web:8080）
-./MailForge
-
-# 浏览器打开 Web 邮箱
-#   http://localhost:8080
-#   注册 alice / bob 两个账户，互相收发加密邮件
-
-# 运行测试
-make test
-```
-
-## 🔌 局域网 / ZeroTier 远程访问
-
-> 服务器跑在 **WSL2** 时，WSL2 内部是一个 NAT 虚拟网络，局域网或 ZeroTier 里的其他设备
-> **无法直接访问** WSL2 内部的 IP（如 `172.18.x.x`）。需要在 Windows 上加一层**端口转发**，
-> 把外部请求转发进 WSL2。
-
-```
-其他设备 ──► ZeroTier/局域网 ──► Windows(0.0.0.0:8888) ──端口转发──► WSL2(172.18.x.x:8888) ──► server
-```
-
-### 1. 一键配置脚本（`setup_portproxy.bat`）
-
-1. **右键 → 以管理员身份运行** 仓库根目录的 `setup_portproxy.bat`
-2. 脚本自动完成三件事：
-   - 读取 WSL2 当前 IP（`wsl hostname -I`）
-   - 添加端口转发：`0.0.0.0:8888 → WSL2:8888`（覆盖所有网卡，含 ZeroTier）
-   - 放行 Windows 防火墙入站 TCP 8888
-3. 运行成功后桌面会生成 `portproxy_setup.log` 便于排错
-4. ⚠️ **重启电脑后 WSL2 IP 会变**，重新运行一次脚本即可（脚本每次都会自动获取最新 IP）
-
-### 2. 局域网直接访问（同一 WiFi）
-
-其他设备浏览器访问：
-
-```
-http://<Windows主机局域网IP>:8888
-```
-
-> ⚠️ 校园网普遍开启 **AP/用户隔离**：同一 WiFi 下设备之间互相访问不了，此时请用 ZeroTier。
-
-### 3. ZeroTier 跨网段访问（校园网推荐）
-
-ZeroTier 把多台设备组成**虚拟局域网**，流量走加密隧道，绕开校园网 AP 隔离与防火墙：
-
-1. 各设备安装 [ZeroTier](https://www.zerotier.com/) 并加入同一个网络（本项目使用 `miku_miku`）
-2. 本机 ZeroTier 运行后获得虚拟 IP（本项目当前为 `10.46.223.81`）
-3. 其他设备访问：`http://<本机ZeroTier IP>:8888`
-
-### 4. 连通性验证
-
-```bash
-# 本机验证端口转发是否生效（Windows cmd / PowerShell）
-telnet 127.0.0.1 8888
-Test-NetConnection 10.46.223.81 -Port 8888
-
-# 其他设备验证（Linux / Termux）
-nc -vz 10.46.223.81 8888
-```
-
-
-## 🧪 测试
-
-```bash
-make test          # 编译并运行全部测试
-```
-
-| 测试 | 内容 |
-|---|---|
-| `tests/test_crypto.cpp` | 加密算法加解密正确性（≥2 种算法往返一致） |
-| `tests/test_protocol.cpp` | SMTP/POP3 协议命令流功能测试 |
-| `tests/test_performance.cpp` | 性能测试：1MB 邮件时延、100 次收发成功率 |
-
-### 性能指标（目标值，待实测）
-
-| 指标 | 课程要求 | 实测 |
-|---|---|---|
-| 1MB 以内邮件平均收发时延 | < 2s | 待验证 |
-| 连续 100 次收发成功率 | ≥ 99% | 待验证 |
-| 加密算法数量 | ≥ 2 种 | AES-CBC + RC4 + XOR |
-
-## 📂 目录结构
+设计要点：
+- **网络层与协议层分离**：`Server` 基类把 socket / bind / listen / accept / 多线程全部封装好；
+  子类只需重写纯虚函数 `handleClient()`，专心写协议。
+- **同一个存储**：SMTP 投递进 `./mailbox/<用户名>/`，POP3 登录后读的也是同一个目录，
+  收发天然打通，这就是"多邮箱账户隔离"。
+
+## 4. 目录结构（按实际代码）
 
 ```
 MailForge/
-├── Makefile                  # 构建脚本
-├── README.md                 # 项目介绍
-├── requirements.md           # 课程需求清单
-├── setup_portproxy.bat       # 局域网/ZeroTier 端口转发一键配置（Windows）
-├── .gitignore
-├── src/                      # C++ 源码
-│   ├── server.cpp            # 里程碑1：HTTP 连通性服务器（端口 8888）
-│   ├── main.cpp              # 入口：启动 SMTP/POP3/Web 三个服务
-│   ├── net/socket.hpp        # Socket 跨平台封装
-│   ├── smtp/smtp_server.*    # SMTP 服务器（RFC 5321）
-│   ├── pop3/pop3_server.*    # POP3 服务器（RFC 1939）
-│   ├── mail/mail_client.*    # SMTP/POP3 客户端
-│   ├── crypto/crypto.*       # 加密模块（≥2 种算法）
-│   ├── store/storage.*       # 邮件存储
-│   └── web/http_server.*     # HTTP 服务器 + 路由
-├── web/                      # 前端静态资源
-│   ├── index.html
-│   ├── css/  js/
-├── tests/                    # 功能与性能测试
-│   ├── test_crypto.cpp
-│   ├── test_protocol.cpp
-│   └── test_performance.cpp
-└── docs/                     # 设计文档 / 答辩材料
+├── MailServer/                    # ★ 当前主线：邮件服务器
+│   ├── main.cpp                   # 程序入口：同时启动 SMTP(2525) + POP3(1110)
+│   ├── include/
+│   │   ├── Server.h               # 网络基类 Server（纯虚函数 handleClient）
+│   │   ├── SmtpServer.h           # SMTP 服务器类 + SmtpMail 结构体
+│   │   └── Pop3Server.h           # POP3 服务器类 + Pop3Mail / Pop3State 结构体
+│   ├── src/
+│   │   ├── Server.cpp             # Server 基类实现
+│   │   ├── SmtpServer.cpp         # SMTP 协议实现（状态机 + 落盘）
+│   │   └── Pop3Server.cpp         # POP3 协议实现（状态机 + 读目录 + 删除）
+│   ├── users.txt                  # POP3 账号表（默认 bob/alice，密码 123456）
+│   ├── mailbox/                   # 邮件存储根目录（运行时自动创建）
+│   │   └── bob/                   # bob 的收件目录（内含 2 封测试邮件 *.eml）
+│   ├── mail_server                # 编译产物（当前主线可执行文件）
+│   └── smtp_server                # 旧编译产物（早期单独编译的 SMTP 程序）
+├── 连接测试/                      # 里程碑 1 的练手代码（HTTP 连通性测试服务器）
+│   ├── server.cpp  utils.h  utils.cpp
+│   └── server                     # 编译产物
+├── SmtpClientWeb/                 # 早期"浏览器发信"联调残留，仅剩 bridge 二进制（无源码）
+│   └── bridge
+├── requirements.md                # 课程需求文档
+├── setup_portproxy.bat            # Windows 端口转发一键配置脚本（局域网/ZeroTier 用）
+├── LICENSE  .gitignore  .vscode/
+└── README.md                      # 本文档
 ```
 
-## 📚 课程对标
+## 5. 快速开始
 
-| 课程要求（序号 18，难度系数 1.0） | 本系统实现 |
+### 5.1 编译
+
+```bash
+cd /home/phantasma/MailForge/MailServer
+g++ -std=c++17 -pthread -o mail_server main.cpp src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp -I include
+```
+
+### 5.2 运行
+
+```bash
+./mail_server
+```
+
+看到以下输出即成功（两个端口都在监听）：
+
+```
+[POP3] 已从 ./users.txt 加载 2 个账号
+==============================================
+ MailForge MailServer 启动
+   SMTP 服务器：端口 2525（发邮件用）
+   POP3 服务器：端口 1110（收邮件用）
+==============================================
+[服务器] 已启动，监听端口 2525
+[服务器] 已启动，监听端口 1110
+```
+
+### 5.3 默认账号
+
+| 用户名 | 密码 | 收件目录 |
+|---|---|---|
+| `bob` | `123456` | `./mailbox/bob/` |
+| `alice` | `123456` | `./mailbox/alice/` |
+
+修改 / 新增账号：编辑 `users.txt`，一行一个 `用户名:密码`，`#` 开头是注释。
+
+### 5.4 手动体验收信（telnet）
+
+```text
+telnet 127.0.0.1 1110
++OK MailForge POP3 server ready
+USER bob              → +OK User bob known
+PASS 123456           → +OK mailbox ready, 2 message(s), ... bytes
+STAT                  → +OK 2 ...
+LIST                  → 列出 2 封邮件
+RETR 1                → 下载第 1 封（多行，以 . 结束）
+DELE 1                → 标记删除（QUIT 时才真正删文件）
+RSET                  → 撤销删除标记
+QUIT                  → +OK ...（此时被 DELE 的邮件才真正从磁盘删除）
+```
+---
+
+## 6. 协议速览（先看懂协议，再读代码）
+
+### 6.1 SMTP（简单邮件传输协议，RFC 5321）—— 用来"发"
+
+基于 TCP 的文本协议，**一问一答**：客户端发一行命令，服务器回一行「状态码 + 说明」。
+
+**一次标准会话流程：**
+
+```text
+客户端                          服务器(2525)
+  │  建立 TCP 连接                  │
+  │◄────────────────────────── 220 MyMailServer ESMTP ready
+  │  EHLO 我的主机名                │
+  │───────────────────────────►    │
+  │◄────────────────────────── 250 Hello 我的主机名,nice to meet you
+  │  MAIL FROM:<alice@example.com>  │
+  │───────────────────────────►    │
+  │◄────────────────────────── 250 OK
+  │  RCPT TO:<bob@example.com>      │
+  │───────────────────────────►    │
+  │◄────────────────────────── 250 OK
+  │  DATA                           │
+  │───────────────────────────►    │
+  │◄────────────────────────── 354 End data with <CR><LF>.<CR><LF>
+  │  邮件原文（头部+空行+正文，一行行发）│
+  │  .   ← 单独一个点表示内容结束      │
+  │───────────────────────────►    │
+  │◄────────────────────────── 250 Message accepted for delivery
+  │  QUIT                           │
+  │───────────────────────────►    │
+  │◄────────────────────────── 221 Bye
+```
+
+**本服务器支持的 SMTP 命令与响应：**
+
+| 命令 | 含义 | 正常响应 | 出错响应 |
+|---|---|---|---|
+| `HELO/EHLO <主机名>` | 打招呼（大小写不敏感） | `250 Hello ...` | — |
+| `MAIL FROM:<地址>` | 声明发件人 | `250 OK` | `501 Syntax error in MAIL FROM` |
+| `RCPT TO:<地址>` | 声明收件人 | `250 OK` | `501 Syntax error in RCPT TO` |
+| `DATA` | 开始传正文 | `354 End data with <CR><LF>.<CR><LF>` | `503 ...need MAIL and RCPT first`（没先声明收发件人） |
+| `.`（DATA 中单独一行） | 正文结束 | `250 Message accepted for delivery` | — |
+| `QUIT` | 退出 | `221 Bye` | — |
+| 其他 | — | — | `500 Unrecognized command` |
+
+**点填充（dot-stuffing）**：邮件正文里任何以 `.` 开头的行，客户端必须先写成 `..`，
+否则服务器会误以为正文结束了；服务器收到 `..` 开头时会把多余的 `.` 去掉再存盘。
+
+### 6.2 POP3（邮局协议第三版，RFC 1939）—— 用来"收"
+
+同样是 TCP 文本协议，但响应用 **`+OK` / `-ERR`** 开头，多行内容以单独一行的 `.` 结束。
+
+**三个阶段（状态机）：**
+
+```text
+连接建立 ─► AUTHORIZATION 认证态 ──PASS 通过──► TRANSACTION 事务态 ──QUIT──► UPDATE 更新态
+          (只允许 USER/PASS/QUIT)              (STAT/LIST/RETR/DELE/...)     (真正删除被 DELE 的邮件)
+```
+
+**本服务器支持的 POP3 命令与响应：**
+
+| 命令 | 可用状态 | 含义 | 正常响应 | 出错响应 |
+|---|---|---|---|---|
+| `USER <用户名>` | 认证态 | 提交用户名 | `+OK User bob known` | `-ERR User xxx unknown` |
+| `PASS <密码>` | 认证态 | 提交密码 | `+OK mailbox ready, N message(s), ...` | `-ERR invalid password` |
+| `STAT` | 事务态 | 邮件数+总字节 | `+OK N bytes` | `-ERR not authenticated...` |
+| `LIST` | 事务态 | 列邮件（多行） | `+OK N messages` + `编号 大小`… + `.` | 同上 |
+| `LIST <编号>` | 事务态 | 查单封大小 | `+OK 编号 大小` | `-ERR no such message` |
+| `RETR <编号>` | 事务态 | 下载一封（多行） | `+OK 大小 octets` + 内容 + `.` | `-ERR no such message` |
+| `DELE <编号>` | 事务态 | 标记删除（不真删） | `+OK message N deleted` | `-ERR no such message (or already deleted)` |
+| `RSET` | 事务态 | 撤销所有 DELE 标记 | `+OK all delete marks cleared` | — |
+| `NOOP` | 事务态 | 保活（无操作） | `+OK` | — |
+| `QUIT` | 任意 | 退出并真正删信 | `+OK MailForge POP3 server signing off` | — |
+
+**POP3 的三个关键设计：**
+1. **DELE 只是打标记**，只有 `QUIT` 才真正删文件；客户端中途断线邮件不会丢。
+2. 消息编号在本会话内固定（`1..N`），删除某封后**其余编号不重排**（`LIST`/`STAT` 不再统计已删的）。
+3. 传输邮件内容时，正文中以 `.` 开头的行要发成 `..`（点填充），防止和结束符 `.` 冲突。
+
+### 6.3 邮件存储格式
+
+- 存储根目录：`./mailbox/`（程序启动时自动创建）。
+- 每个用户一个子目录：`./mailbox/<用户名>/`，用户名取收件人邮箱 `@` 前部分并转小写
+  （`bob@example.com` → `./mailbox/bob/`）。
+- 文件名：`<Unix时间戳>_<随机数>.eml`，如 `1788314490_846930886.eml`，
+  加随机数是为了避免多线程并发投递时文件名冲突。
+- 文件内容是**标准 RFC 5322 邮件**（头部区 + 空行 + 正文），示例：
+
+```eml
+Date: Wed Sep  2 10:00:52 2026
+From: alice@example.com
+To: bob@example.com
+Subject: (no subject)
+
+Subject: Hello from MailForge
+
+这是一封测试邮件！
+```
+
+> 头部区：若客户端在 DATA 里写了 `From/To/Subject/Date` 就原样保留；
+> 没写则服务器用信封信息（MAIL FROM / RCPT TO）与当前时间**补全**，保证 `.eml` 能被正常解析显示。
+
+---
+
+## 7. 代码详解 —— 网络基类（`MailServer/include/Server.h` + `src/Server.cpp`）
+
+> 作用：把「建 socket → 设端口复用 → bind → listen → accept → 每连接一线程」这套
+> **所有网络服务器都一样的流程**封装好。SMTP / POP3 都继承它，只需各自重写 `handleClient()`。
+> 源码里把这段戏称为"模板方法模式"。
+
+### 7.1 `class Server` 类总览
+
+| 类型 | 名称 | 说明 |
+|---|---|---|
+| 私有成员 | `int server_fd` | 监听 socket 的文件描述符（-1 表示未创建/已关闭） |
+| 私有成员 | `int port` | 要监听的端口号（构造时传入并保存） |
+| 私有成员 | `std::atomic<bool> is_running` | 运行标志，控制 accept 循环是否继续（原子类型，多线程安全） |
+| 私有 | `Server(const Server&)` 与 `operator=` | 已删除（`= delete`），禁止拷贝服务器对象 |
+| 公开 | `Server(int port)` | 构造函数 |
+| 公开 | `virtual ~Server()` | 虚析构函数 |
+| 公开 | `bool start()` | 启动服务器（阻塞，见 7.3） |
+| 公开 | `void stop()` | 请求停止服务器（见 7.4） |
+| 保护 | `virtual void handleClient(int) = 0` | **纯虚函数**，子类必须实现 |
+
+### 7.2 `Server::Server(int port)` —— 构造函数
+
+| 项目 | 内容 |
 |---|---|
-| 实现 SMTP 协议 | ✅ 原生 C++ 实现（RFC 5321） |
-| 实现 POP3 协议 | ✅ 原生 C++ 实现（RFC 1939） |
-| 邮件内容加密（提升项） | ✅ ≥2 种加密算法 |
-| B/S 或 C/S 架构实现前后端 | ✅ B/S 架构（C++ HTTP 服务器 + Web 前端） |
-| 1MB 邮件收发时延 < 2s | ⏳ 测试脚本验证中 |
-| 100 次收发成功率 ≥ 99% | ⏳ 测试脚本验证中 |
+| 输入参数 | `port`（int）：本服务器要监听的端口号 |
+| 返回值 | 无 |
+| 行为 | 用初始化列表把 `server_fd` 置 `-1`、保存 `port`、`is_running` 置 `false`。**只保存参数，不创建 socket**（真正的 socket 在 `start()` 里创建） |
 
-## 📄 License
+### 7.3 `Server::~Server()` —— 析构函数
 
-MIT License
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | 无 |
+| 返回值 | 无 |
+| 行为 | 调用 `stop()`，确保服务器退出时关闭监听 socket、不遗留资源 |
+
+### 7.4 `bool Server::start()` —— 启动服务器（核心流程）
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | 无（端口用构造函数保存的成员 `port`） |
+| 返回值 | `bool`：`true` 表示流程走完正常返回；`false` 表示**中途失败**（已打印 `perror` 错误原因） |
+| 阻塞 | **是**。成功后进入 accept 死循环，只有 `stop()` 被调用（或进程被杀）才会返回 |
+
+按顺序执行：
+
+1. `socket(AF_INET, SOCK_STREAM, 0)` —— 创建 IPv4 + TCP 流式 socket，失败返回 `false`。
+2. `setsockopt(SO_REUSEADDR)` —— 设置**端口复用**，程序崩溃后能立刻重新绑定同一端口。
+3. `bind()` —— 把 `0.0.0.0:port`（所有网卡）绑定到 `server_fd`。
+4. `listen(server_fd, 5)` —— 开始监听，内核等待队列长度 5。
+5. `is_running = true`，打印 `[服务器] 已启动，监听端口 XXXX`。
+6. **accept 主循环**（`while(is_running)`）：
+   - `accept()` 阻塞等待新客户端；返回 `client_fd`（负责和该客户端收发数据）；
+   - 打印客户端 IP 和端口；
+   - `std::thread worker([this, client_fd]{ handleClient(client_fd); close(client_fd); })`，
+     `worker.detach()` —— **每个客户端开一条线程**处理协议，互不阻塞。
+7. 退出循环后 `close(server_fd)`，打印 `[服务器] 已停止`，返回 `true`。
+
+### 7.5 `void Server::stop()` —— 请求停止
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | 无 |
+| 返回值 | 无 |
+| 行为 | 把 `is_running` 置 `false`，并 `close(server_fd)`（close 后阻塞在 `accept` 的调用会立刻返回 -1，循环从而退出）。再把 `server_fd` 置 `-1` 防止重复 close |
+
+### 7.6 `virtual void handleClient(int client_fd) = 0` —— 纯虚函数
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `client_fd`（int）：当前客户端连接的 socket 句柄 |
+| 返回值 | 无（`void`） |
+| 说明 | 这是每个具体服务器的**协议入口**。基类不实现；`SmtpServer` 和 `Pop3Server` 各自重写（详见下文第 8、9 章）。它在线程里执行，返回即代表该客户端会话结束 |
+
+> ⚠️ 历史 Bug 记录：`start()` 早期版本在 `socket()` 成功后多写了一个 `else { return true; }`，
+> 导致下面 bind/listen/accept 全部成为**死代码**、服务器"秒退"；已修复（见第 13 章）。
+
+---
+
+## 8. 代码详解 —— SMTP 服务器（`MailServer/include/SmtpServer.h` + `src/SmtpServer.cpp`）
+
+### 8.1 `struct SmtpMail` —— "一封邮件"的会话状态结构体
+
+SMTP 发信是**分步**的（MAIL → RCPT → DATA），服务器需要把几步的信息**跨命令拼在一起**，
+所以用这个结构体充当会话状态，跟随整个会话传递。
+
+| 字段 | 类型 | 含义 | 何时被填充 |
+|---|---|---|---|
+| `from` | `std::string` | 信封**发件人**地址 | `MAIL FROM:<...>` 命令时 |
+| `to` | `std::string` | 信封**收件人**地址 | `RCPT TO:<...>` 命令时 |
+| `body` | `std::string` | DATA 阶段逐行收到的**完整邮件原文**（头部+空行+正文） | DATA 模式每收到一行就追加 |
+| `headers` | `std::string` | 头部区原文（第一个空行之前，原样保留） | DATA 结束时由 `parseMailData()` 解析 |
+| `text` | `std::string` | 正文（第一个空行之后） | 同上 |
+| `headerFrom` | `std::string` | 头部里 `From:` 字段的值（客户端没写则为空） | 同上 |
+| `headerTo` | `std::string` | 头部里 `To:` 字段的值 | 同上 |
+| `subject` | `std::string` | 头部里 `Subject:` 字段的值 | 同上 |
+| `headerDate` | `std::string` | 头部里 `Date:` 字段的值 | 同上 |
+
+> 信封（envelope）≠ 头部（header）：`MAIL FROM`/`RCPT TO` 是传输时的"信封"，
+> DATA 里的 `From:`/`To:` 是显示用的"头部"，两者可能不同，代码分别保存。
+
+### 8.2 `class SmtpServer` 类总览
+
+继承自 `Server`。公开接口只有构造函数；协议逻辑全部在私有/保护成员里。
+
+| 类型 | 成员 | 说明（详见下文） |
+|---|---|---|
+| 公开 | `SmtpServer(int port)` | 构造函数：创建 `./mailbox` 目录 |
+| 公开 | `~SmtpServer()` | 默认析构（没有额外资源要释放） |
+| 保护 | `void handleClient(int)` | 重写：处理一个 SMTP 客户端会话 |
+| 私有 | `bool sendAll(int, const char*, size_t)` | 底层"保证发完"的封装 |
+| 私有 | `void sendResponse(int, const std::string&)` | 发一行 SMTP 响应（自动补 `\r\n`） |
+| 私有 | `bool processCommand(int, const std::string&, SmtpMail&, bool&)` | **状态机核心**：解析并应答一条命令 |
+| 私有 | `void parseMailData(SmtpMail&)` | 把收齐的正文拆成 头部/正文/各标准头 |
+| 私有 | `std::string getHeaderValue(const std::string&, const std::string&)` | 在头部原文里按名字取值（大小写不敏感） |
+| 私有 | `void saveMail(const SmtpMail&)` | 把邮件按收件人写入 `./mailbox/<用户名>/` |
+
+### 8.3 `SmtpServer::SmtpServer(int port)` —— 构造函数
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `port`（int）：SMTP 监听端口 |
+| 返回值 | 无 |
+| 行为 | ① 把 `port` 交给基类 `Server`；② `mkdir("./mailbox", 0755)` 创建邮件根目录（已存在则忽略错误） |
+
+### 8.4 `bool SmtpServer::sendAll(int fd, const char* data, size_t len)` —— 保证发完
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `fd`：客户端 socket；`data`：要发送的数据首地址；`len`：要发送的字节数 |
+| 返回值 | `bool`：`true` = 全部发送完毕；`false` = 发送失败（连接已断等） |
+| 原理 | 单次 `send()` 不一定一次发完、还可能被信号打断（返回 `EINTR`）。循环 `send`，每次从上次未发完的位置接着发，直到全部发出。`send` 返回 0 表示对端关闭，视为失败 |
+
+### 8.5 `void SmtpServer::sendResponse(int fd, const std::string& response)` —— 发一行响应
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `fd`：客户端 socket；`response`：响应文本（**不含换行**），如 `"250 OK"` |
+| 返回值 | 无 |
+| 行为 | 给响应补上 SMTP 协议规定的 `\r\n` 后调用 `sendAll` 发出；失败时打印日志 |
+| 为什么不自己补 `\n` | RFC 规定 SMTP 所有行必须以 **CRLF（`\r\n`）** 结尾，严格客户端缺了 `\r` 会解析失败 |
+
+### 8.6 `bool SmtpServer::processCommand(int fd, const std::string& line, SmtpMail& mail, bool& dataMode)` —— 命令状态机（核心）
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `fd`：客户端 socket；`line`：客户端发来的一行内容（已去掉 `\r\n`）；`mail`：本会话拼装的邮件（**引用**，跨命令共享/修改）；`dataMode`：是否处于 DATA 模式（**引用**，函数内会改） |
+| 返回值 | `bool`：`true` = 继续会话；`false` = 会话结束（收到 `QUIT`） |
+
+**处理逻辑分两大段：**
+
+**① DATA 模式中（`dataMode == true`）——这一行不是命令，是正文的一行：**
+- 若 `line == "."`（单独一个点）：正文结束 → `dataMode=false` → `parseMailData()` 拆头 → 回 `250 Message accepted for delivery` → `saveMail()` 落盘 → 重置 `mail`（准备收下一封）；
+- 否则：先做**点填充还原**（`..` 开头的行去掉一个点，变回 `.`），再把该行加 `\r\n` 追加进 `mail.body`。
+
+**② 普通模式——解析命令（命令转大写后逐个匹配）：**
+
+| 命令 | 处理细节 | 响应 |
+|---|---|---|
+| `HELO` / `EHLO` | 参数为空则问候语用 `unknown`，否则用参数 | `250 Hello <主机名>,nice to meet you` |
+| `MAIL FROM:` | 去掉 `FROM:` 前缀、前导空格、首尾 `<>` 后得到地址；空地址算语法错误 | 成功 `250 OK`；失败 `501 Syntax error in MAIL FROM` |
+| `RCPT TO:` | 同上解析收件人，存入 `mail.to` | 成功 `250 OK`；失败 `501 Syntax error in RCPT TO` |
+| `DATA` | 若发件人/收件人都还没声明（`mail.from/to` 为空）则拒绝；否则进入 DATA 模式 | 成功 `354 End data with <CR><LF>.<CR><LF>`；失败 `503 ...need MAIL and RCPT first` |
+| `QUIT` | 回复再见 | `221 Bye`，并返回 `false` 让会话结束 |
+| 空行 | 直接忽略（什么也不回） | — |
+| 其它未知命令 | 回通用错误 | `500 Unrecognized command` |
+
+> ⚠️ 历史 Bug 记录：早期版本把"点填充还原"放错到普通模式分支，且后面所有正常命令解析
+> 都成了**不可达代码**（服务器只打招呼、不应答任何命令）；另在 MAIL 分支后有一个**悬空的
+> `return true`**，使 RCPT/DATA/QUIT 全部失效。均已修复（见第 13 章）。
+
+### 8.7 `void SmtpServer::parseMailData(SmtpMail& mail)` —— 解析 DATA 原文
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `mail`（引用）：其 `body` 字段必须已收齐完整邮件原文；函数会**修改**它的 `headers/text/headerFrom/headerTo/subject/headerDate` |
+| 返回值 | 无 |
+| 行为 | ① 跳过开头所有空行；② 在剩余内容里找 `\r\n\r\n`（头部与正文的分隔空行）：之前的是 `headers`，之后的是 `text`；③ 用 `getHeaderValue()` 分别提取 `From / To / Subject / Date` 存进对应字段 |
+
+### 8.8 `std::string SmtpServer::getHeaderValue(const std::string& headers, const std::string& name)` —— 取某个头的值
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `headers`：头部区原文（多行）；`name`：要找的字段名，如 `"Subject"` |
+| 返回值 | `std::string`：该字段的值（已去掉前导空格/Tab，**去掉**行尾换行）；找不到返回空串 `""` |
+| 规则 | ① 字段名**大小写不敏感**（RFC 5322）；② 支持**续行**（下一行以空格/Tab 开头时拼接到当前值后）；③ 不解析头部里的折叠异常情况，用于本项目够用 |
+
+### 8.9 `void SmtpServer::handleClient(int client_fd)` —— 一个 SMTP 会话的完整生命周期
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `client_fd`：客户端 socket（由基类线程传入） |
+| 返回值 | 无 |
+| 行为 | ① 先发问候 `220 MyMailServer ESMTP ready`；② 创建本会话的 `mail` 与 `dataMode`；③ **行缓冲循环**：`recv` 读 4KB 进 `buf`，按 `\n` 拆成一行行，去掉行尾 `\r`，交给 `processCommand()`；`buf` 里拆剩下的"半行"留在缓冲区等下次 `recv` 拼齐；④ `recv` 返回 0（对端断开）或 `processCommand` 返回 `false`（QUIT）时关闭 socket 结束线程 |
+
+> 为什么要"行缓冲"：TCP 是**流式协议**，一次 `recv` 可能包含多条命令，也可能一条命令被拆成多次 `recv`。不按 `\n` 拆行就会把多条命令拼在一起、或把命令拦腰截断，导致响应错乱。
+
+### 8.10 `void SmtpServer::saveMail(const SmtpMail& mail)` —— 把邮件写入用户收件目录
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `mail`：一封已经解析完成的邮件（`from/to` 必须有值） |
+| 返回值 | 无 |
+| 行为 | ① 由 `mail.to`（信封收件人）取出 `@` 前部分 → 去首尾空白 → 转小写，得到用户名（解析不出则兜底存根目录并告警）；② `mkdir` 确保 `./mailbox/<用户名>/` 存在；③ 生成文件名 `<秒级时间戳>_<rand()>.eml`；④ 组装 RFC 5322 头部：`Date/From/To/Subject` 客户端 DATA 里**没写**时用信封信息+当前时间**补全**（Date 用 `ctime`，From 用 `mail.from`，To 用 `mail.to`，Subject 用占位 `(no subject)`），**写了**就保留客户端原文 `mail.headers`；⑤ 确保头部最后以 `\r\n` 结尾后，按「头部 + 空行 + 正文」写入文件；⑥ 关闭文件并打印保存路径与主题日志 |
+
+---
+
+## 9. 代码详解 —— POP3 服务器（`MailServer/include/Pop3Server.h` + `src/Pop3Server.cpp`）
+
+> POP3 负责"收信"。代码结构与 SMTP 完全对称：同样继承 `Server`，
+> 同样有 `sendAll/sendResponse/processCommand/handleClient`，区别只在协议命令与存储方向
+> （SMTP **写**进 `./mailbox/<用户>/`，POP3 从那里**读**，并在 QUIT 时按标记删除）。
+
+### 9.1 `struct Pop3Mail` —— "邮箱快照"里的一封邮件
+
+登录成功后，服务器把该用户目录下所有 `.eml` 一次性读进内存做成快照，`STAT/LIST/RETR/DELE`
+都对着快照操作，不需要反复读磁盘。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `path` | `std::string` | 完整文件路径，如 `./mailbox/bob/1788314490_846930886.eml` |
+| `size` | `long long` | 文件字节数（`STAT`/`LIST` 的 octets 就是它） |
+| `deleted` | `bool` | 本会话是否已被 `DELE` **标记**删除（只是标记！QUIT 才真删文件） |
+
+### 9.2 `struct Pop3State` —— 一次 POP3 会话的状态
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `username` | `std::string` | `USER` 传来的登录名**原文**（如 `bob@example.com`），用于打日志 |
+| `userKey` | `std::string` | 规范化后的用户名（小写、只留 `@` 前部分），用来**找目录 / 查账号** |
+| `authed` | `bool` | `PASS` 是否通过（默认 `false`；通过后进入事务态） |
+| `mails` | `std::vector<Pop3Mail>` | 当前用户的邮箱快照（会话内编号 `1..N` 固定不变） |
+
+### 9.3 `class Pop3Server` 类总览
+
+| 类型 | 成员 | 说明（详见下文） |
+|---|---|---|
+| 私有成员 | `std::map<std::string,std::string> accounts_` | 账号表：规范化用户名 → 密码 |
+| 公开 | `Pop3Server(int port)` | 构造函数：确保 `./mailbox` 存在 + 加载账号表 |
+| 公开 | `~Pop3Server()` | 默认析构 |
+| 保护 | `void handleClient(int)` | 重写：处理一个 POP3 客户端会话 |
+| 私有 | `bool sendAll(int, const char*, size_t)` | 同 SMTP：保证发完 |
+| 私有 | `void sendResponse(int, const std::string&)` | 发一行响应（自动补 `\r\n`） |
+| 私有 | `void loadAccounts()` | 读 `./users.txt` 填 `accounts_`（带内置默认账号兜底） |
+| 私有 | `std::string normalizeUser(const std::string&) const` | 用户名规范化：小写 + 去 `@` 域名 |
+| 私有 | `std::string mailboxDir(const std::string&) const` | 由 userKey 拼收件目录路径 |
+| 私有 | `void loadUserMails(const std::string&, std::vector<Pop3Mail>&)` | 扫描目录生成邮箱快照 |
+| 私有 | `bool processCommand(int, const std::string&, Pop3State&)` | **状态机核心** |
+| 私有(static) | `void splitCommand(const std::string&, std::string&, std::string&)` | 一行拆成 命令+参数 |
+| 私有(static) | `int parseMsgNum(const std::string&)` | 参数解析成消息编号 |
+| 私有 | `bool isValidMsg(int, const Pop3State&) const` | 编号是否合法且未删除 |
+| 私有 | `void statMailbox(const Pop3State&, int&, long long&) const` | 统计未删邮件数与总字节 |
+| 私有 | `void sendMailContent(int, const std::string&)` | RETR 时按点填充规则发文件内容 |
+
+### 9.4 `Pop3Server::Pop3Server(int port)` —— 构造函数
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `port`（int）：POP3 监听端口 |
+| 返回值 | 无 |
+| 行为 | ① 端口交给基类 `Server`；② `mkdir("./mailbox")`（幂等）；③ `loadAccounts()` 加载账号表 |
+
+### 9.5 `void Pop3Server::loadAccounts()` —— 加载账号表
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | 无 |
+| 返回值 | 无（结果写入成员 `accounts_`） |
+| 行为 | ① 先塞内置默认账号 `bob/123456`、`alice/123456`（保证第一次能跑）；② 尝试打开 `./users.txt`：逐行解析，去掉行尾 `\r`、首尾空白，跳过空行与 `#` 注释，按第一个 `:` 拆成 `用户名:密码`，用户名经 `normalizeUser()` 规范化后存入临时表；③ 文件里至少有一个有效账号就**整体替换**默认账号，否则保留默认并打印提示 |
+
+### 9.6 `std::string Pop3Server::normalizeUser(const std::string& input) const` —— 用户名规范化
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `input`：客户端提交的登录名或账号表里的用户名 |
+| 返回值 | 规范化结果：`"bob@example.com"→"bob"`、`"Bob"→"bob"`、`" alice "→"alice"`；全是空白则返回空串 |
+| 规则 | ① 去首尾空白；② 若含 `@`，只取 `@` 之前的部分；③ 全部转小写 |
+| 目的 | 让 `bob` / `Bob` / `bob@example.com` 都能对上**同一个**目录和账号，避免大小写不一致收不到信 |
+
+### 9.7 `std::string Pop3Server::mailboxDir(const std::string& userKey) const` —— 拼收件目录
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `userKey`：规范化用户名（如 `bob`） |
+| 返回值 | `"./mailbox/" + userKey`（如 `./mailbox/bob`） |
+
+### 9.8 `void Pop3Server::loadUserMails(const std::string& userKey, std::vector<Pop3Mail>& mails)` —— 生成邮箱快照
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `userKey`：规范化用户名；`mails`（引用，出参）：调用前会被 `clear()`，函数结束后是完整的邮件快照 |
+| 返回值 | 无 |
+| 行为 | ① `opendir(mailboxDir(userKey))`；目录不存在 = 该用户从没收到过信，按**空邮箱**处理直接返回；② 收集所有以 `.eml` 结尾的文件名；③ `std::sort` **按文件名排序**（文件名前缀是时间戳，排序后即接近收信先后，保证每次会话第 N 封固定）；④ 逐个 `stat()` 拿到文件大小，跳过非常规文件（如子目录），组装成 `Pop3Mail` 填入快照 |
+
+### 9.9 `bool Pop3Server::sendAll / void sendResponse` —— 底层收发
+
+与 SMTP 版完全相同的实现（循环 send 保证发完；响应补 `\r\n` 再发），日志前缀为 `[POP3]`。见 8.4 / 8.5。
+
+### 9.10 `void Pop3Server::splitCommand(const std::string& line, std::string& cmd, std::string& args)`（static）—— 拆命令
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `line`：客户端一行（已去 `\r\n`）；`cmd` / `args`（引用，出参）：拆出的命令与参数 |
+| 返回值 | 无 |
+| 行为 | 找第一个空格，之前是 `cmd`、之后是 `args`；`args` 开头的多余空格/制表符全部删掉；`cmd` 统一转大写（POP3 命令不区分大小写）；无参数的命令 `args` 为空串 |
+
+### 9.11 `int Pop3Server::parseMsgNum(const std::string& args)`（static）—— 解析消息编号
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `args`：命令参数（应为纯数字字符串） |
+| 返回值 | 正整数 = 消息编号；`0` = 非法（空串 / 含非数字 / 超出上限，POP3 编号从 1 起，0 正好用作"没解析出来"） |
+| 实现 | 逐字符校验并累加，用 `long long` 中间累加防溢出（超过 1 亿直接判 0） |
+
+### 9.12 `bool Pop3Server::isValidMsg(int num, const Pop3State& st) const` —— 编号是否可操作
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `num`：客户端给的消息编号；`st`：会话状态 |
+| 返回值 | `true` = 该编号在 `1..mails.size()` 范围内**且未被 DELE 标记**；否则 `false` |
+
+### 9.13 `void Pop3Server::statMailbox(const Pop3State& st, int& count, long long& totalBytes) const` —— 统计邮箱
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `st`：会话状态（含快照）；`count`（引用，出参）：未删除邮件数；`totalBytes`（引用，出参）：未删除邮件总字节数 |
+| 返回值 | 无 |
+| 行为 | 遍历快照，跳过 `deleted == true` 的项，累加数量与字节 |
+
+### 9.14 `void Pop3Server::sendMailContent(int fd, const std::string& path)` —— RETR 发邮件内容
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `fd`：客户端 socket；`path`：要发送的 `.eml` 完整路径 |
+| 返回值 | 无 |
+| 行为 | ① 以二进制模式打开文件，打不开则回 `-ERR cannot open message file`；② 逐行读（`getline` 按 `\n` 切），去掉行尾残留的 `\r`；③ **点填充**：行首是 `.` 的在前面再加一个 `.`；④ 每行经 `sendResponse` 发出（自动补 `\r\n`，空行也正确）；⑤ 全部发完后发送单独一行的 `.` 表示多行内容结束 |
+| 为什么要点填充 | 单独一行的 `.` 是 POP3 多行响应的**结束标记**，若正文真有以 `.` 开头的行而不加转义，客户端会提前误以为内容结束 |
+
+### 9.15 `bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st)` —— 命令状态机（核心）
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `fd`：客户端 socket；`line`：一行命令（已去 `\r\n`）；`st`（引用）：本会话状态（用户名/认证标记/邮箱快照），函数内会修改 |
+| 返回值 | `bool`：`true` 继续会话；`false` 会话结束（QUIT） |
+
+**① 空行**：直接忽略。
+
+**② `QUIT`（任何状态下都允许）**：已登录则进入 **UPDATE** 阶段 —— 遍历快照，把所有
+`deleted == true` 的邮件用 `unlink()` **真正删除**（逐封打印日志），随后回
+`+OK MailForge POP3 server signing off` 并返回 `false`。
+
+**③ 认证态（`!st.authed`）**：
+
+| 命令 | 处理 | 响应 |
+|---|---|---|
+| `USER <名>` | 保存原文到 `st.username`，规范化到 `st.userKey`；查账号表 | 在表内 `+OK User xxx known`；不在 `-ERR User xxx unknown`；无参数 `-ERR USER requires a mailbox name` |
+| `PASS <密码>` | 必须先 USER；查表比对密码 | 匹配：`authed=true`，`mkdir` 确保收件目录存在，`loadUserMails` 读快照，回 `+OK mailbox ready, N message(s), X bytes`；不匹配：清空用户名、回 `-ERR invalid password` |
+| 其它 | 事务态命令在认证态不合法 | `-ERR not authenticated, send USER and PASS first` |
+
+**④ 事务态（已登录）**：
+
+| 命令 | 处理 | 响应 |
+|---|---|---|
+| `STAT` | 调 `statMailbox` | `+OK N X` |
+| `LIST` | 无参数：先发总览行 `+OK N message(s), X bytes`，再逐封发 `编号 大小`，最后单独 `.` 结束；带参数：单封 `+OK num size` | 非法编号 `-ERR no such message` |
+| `RETR <编号>` | 校验编号 → 回 `+OK size octets` → `sendMailContent` | 非法编号 `-ERR no such message` |
+| `DELE <编号>` | 只把快照里那封的 `deleted` 置 `true`（打标记） | `+OK message N deleted`；已删/非法 `-ERR no such message (or already deleted)` |
+| `RSET` | 把快照里所有 `deleted` 复位为 `false`（后悔药） | `+OK all delete marks cleared` |
+| `NOOP` | 什么都不做（保活防超时掐线） | `+OK` |
+| `USER`/`PASS` | 已登录再认证没意义 | `-ERR already authenticated` |
+| 其它 | — | `-ERR unknown command` |
+
+### 9.16 `void Pop3Server::handleClient(int client_fd)` —— 一个 POP3 会话的完整生命周期
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | `client_fd`：客户端 socket |
+| 返回值 | 无 |
+| 行为 | ① 发问候 `+OK MailForge POP3 server ready`；② 创建本会话状态 `Pop3State st`；③ 行缓冲循环（与 SMTP 完全一致：`recv` 4KB → 按 `\n` 拆行 → 去 `\r` → `processCommand`）；④ 客户端断开或 `QUIT` 时关 socket 结束线程 |
+| 注意 | 断开连接 ≠ QUIT：**被 DELE 标记但没发 QUIT 就断线的邮件不会真删**，这是 POP3 协议防误删的设计 |
+
+---
+
+## 10. 代码详解 —— 程序入口（`MailServer/main.cpp`）
+
+### 10.1 `int main()` —— 程序入口
+
+| 项目 | 内容 |
+|---|---|
+| 输入参数 | 无（不解析命令行参数） |
+| 返回值 | `int`（正常永不返回：两个服务器都是死循环） |
+| 行为 | ① 构造 `SmtpServer smtpServer(2525)` 与 `Pop3Server pop3Server(1110)`；② 打印启动横幅；③ `std::thread pop3Thread(...)` 让 POP3 在**子线程**跑 `start()`；④ 主线程调用 `smtpServer.start()` 阻塞在 SMTP 的 accept 循环；⑤ 正常流程执行不到最后的 `pop3Thread.join()` |
+| 为什么分两个线程 | `start()` 是阻塞死循环，想让两个服务器"同时"跑，就必须各占一条线程 |
+
+---
+
+## 11. 账号文件与数据文件说明
+
+### 11.1 `MailServer/users.txt` —— POP3 账号表（纯文本）
+
+| 项目 | 内容 |
+|---|---|
+| 位置 | 与 `mail_server` 同一运行目录下（程序用相对路径 `./users.txt` 打开） |
+| 格式 | 一行一个 `用户名:密码`；`#` 开头是注释；空行忽略 |
+| 解析规则 | 用户名会自动"转小写 + 去掉 `@` 域名"，所以写 `bob`、`Bob`、`bob@example.com` 效果一样（见 `normalizeUser`） |
+| 与收件目录的关系 | 用户名对应 `./mailbox/<用户名>/`；新增用户在文件里加一行即可，第一次被投递邮件时目录自动创建 |
+| 文件缺失/全空 | 程序会**兜底**使用内置默认账号 `bob/123456`、`alice/123456`，并在启动日志中提示 |
+
+当前内容：
+
+```text
+bob:123456
+alice:123456
+```
+
+### 11.2 邮箱数据目录 `MailServer/mailbox/`
+
+```
+mailbox/
+├── bob/                        # 用户名 = 收件人@前面的部分（小写）
+│   ├── 1788314452_1804289383.eml
+│   └── 1788314490_846930886.eml
+└── alice/                      # 用户第一次 POP3 登录成功后自动创建（可空）
+```
+
+- SMTP 收信 → 按收件人投到对应子目录；
+- POP3 登录 → 扫描对应用户的子目录生成快照；
+- 文件是标准 `.eml`，可直接用文本编辑器 / 邮件客户端打开查看。
+
+---
+
+## 12. 仓库内其余代码说明（非当前主线）
+
+### 12.1 `连接测试/` —— 里程碑 1 的练手代码（HTTP 连通性服务器）
+
+早期学习 Socket 时写的**单线程** TCP/HTTP 服务器，用来验证浏览器能连上 C++ 后端。
+与 MailServer 无关，保留作学习参考。其中包含：
+
+**`utils.h / utils.cpp`**
+
+| 条目 | 内容 |
+|---|---|
+| 宏 `SERVER_PORT 8888` | 练手服务器的监听端口 |
+| 宏 `BUFFER_SIZE 4096` | `recv()` 单次读取上限 |
+| `std::string trim(const std::string& str)` | **输入**：任意字符串；**返回**：去掉首尾空白（空格/Tab/回车/换行）后的字符串；整串全是空白时返回 `""`。实现用 `find_first_not_of` + `find_last_not_of` 定位非空白区间后 `substr` 截取 |
+
+**`server.cpp`** —— 单线程连通性服务器
+
+| 函数 | 输入参数 | 返回值 | 作用 |
+|---|---|---|---|
+| `void handle_client(int client_fd)` | 客户端 socket | 无 | `recv` 收请求并打印 → 拼一段写死的 HTML → 按 HTTP/1.1 响应格式发回（含 `Content-Length`）→ `close` |
+| `int main()` | 无 | 0 | `socket → setsockopt → bind(端口3225) → listen → while(accept)`，每收到一个连接就同步调用 `handle_client`（单线程，串行处理） |
+
+> 注：该文件里宏 `PORT` 定义为 3225（与头文件里的 8888 无关，因为是两段独立练手代码）。
+
+### 12.2 `SmtpClientWeb/` —— 早期浏览器发信联调残留
+
+目录里只有编译产物 `bridge`（ELF 可执行文件），**仓库内没有它的源码**，不属于当前主线，
+可视为早期"浏览器 → bridge → SMTP"联调尝试的遗留物。
+
+### 12.3 `setup_portproxy.bat` —— Windows 端口转发脚本
+
+用于 WSL2 环境：自动读取 WSL 内部 IP，在 Windows 上添加 `0.0.0.0:端口 → WSL:端口` 的
+`netsh portproxy` 转发并放行防火墙，让局域网 / ZeroTier 设备能访问到跑在 WSL 里的服务器。
+
+### 12.4 `requirements.md` —— 课程需求文档
+
+原始课程需求（SMTP/POP3 收发、加密、性能指标等），与当前代码的**对照状态**：
+协议收发部分已完成，加密与 Web 端为后续里程碑。
+
+---
+
+## 13. 已修复的 Bug 记录（重要）
+
+在把整套代码跑通的过程中，修复了以下会导致服务器无法工作的问题：
+
+| # | 位置 | 问题 | 影响 | 修复 |
+|---|---|---|---|---|
+| 1 | `Server::start()` | `socket()` 成功后多写 `else { return true; }` | 后面的 bind/listen/accept 全是死代码，**服务器"秒退"、不监听端口** | 删除提前 `return`，让流程继续 |
+| 2 | `Server::start()` | `setsockopt(..., sizeof(opt < 0))` 笔误 | 传了 `bool` 的长度 1 而不是 `int` 的 4（部分平台会失效） | 改为 `sizeof(opt)` |
+| 3 | `SmtpServer::processCommand()` | `if(dataMode)` 的两个分支都 `return true`，且把点填充还原写在非 DATA 分支 | 后边的 HELO/MAIL/RCPT/DATA/QUIT 全部**不可达**，服务器只回 220 不应答任何命令 | 还原逻辑移进 DATA 模式的 else 分支；非 DATA 时继续往下解析命令 |
+| 4 | `SmtpServer::processCommand()` | `MAIL` 分支结束后悬空一个 `return true;` | `RCPT / DATA / QUIT` 全部**失效**（发信卡在 RCPT） | 把 `return true` 收进 `if(cmd=="MAIL")` 块内 |
+| 5 | `SmtpServer::processCommand()` | HELO 里 `else args;` 是无用语句 | 问候语里主机名恒为空 | 改为 `else domain = args;` |
+| 6 | `SmtpServer::saveMail()` | 所有邮件平铺存 `./mailbox/` | 无法按用户隔离，POP3 无意义 | 改为按收件人投递到 `./mailbox/<用户名>/`（新功能） |
+
+---
+
+## 14. 测试情况
+
+开发完成后用 Python 标准库 `smtplib`（SMTP 客户端）、`poplib`（POP3 客户端）以及裸 socket
+做了**端到端协议测试，24 项全部通过**，覆盖：
+
+- 认证：错误密码拒绝、未登录访问事务命令拒绝、`bob@example.com` 带域名登录也能识别；
+- 收信：`STAT / LIST / LIST n / RETR`（含中文正文）与各种非法编号的 `-ERR` 分支；
+- 删除语义：`DELE` 只打标记 → `STAT/LIST/RETR` 立刻反映 → `RSET` 反悔 → 断线（不发 QUIT）不删文件 → **QUIT 才真正删除**；
+- 协议细节：POP3 **点填充**（正文 `.` 开头行在网络上发成 `..`）；
+- 多用户隔离：`alice` 登录看不到 `bob` 的邮件；
+- 全链路：`SMTP 发信 → 自动投递到 ./mailbox/bob/ → POP3 登录收取`。
+
+复测命令：
+
+```bash
+cd MailServer
+./mail_server &                 # 先启动服务器
+python3 /tmp/mail_test.py       # 端到端测试脚本（本机开发时用，见下）
+```
+
+> `/tmp/mail_test.py` 是开发期间编写的端到端测试脚本（使用 Python 标准库 `smtplib` /
+> `poplib` + 裸 socket），不属于仓库源码；你也可以用 Python 交互式自行验证，例如：
+> `python3 -c "import poplib; p=poplib.POP3('127.0.0.1',1110); p.user('bob'); p.pass_('123456'); print(p.stat()); p.quit()"`
+
+---
+
+## 15. 常见问题（FAQ）
+
+**Q1：为什么不用 25/110 而用 2525/1110？**
+Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦截。2525/1110 是高端口，本地开发测试最方便。
+
+**Q2：POP3 收完信，服务器上的邮件会被删掉吗？**
+不会。本实现里只有客户端显式发 `DELE` 且正常 `QUIT` 才删文件；只 `RETR`（下载）不删信。对将来的 Web 邮箱很友好。
+
+**Q3：怎么新增一个用户？**
+在 `users.txt` 加一行 `新用户名:密码`，并重启服务器（`loadAccounts` 只在启动时执行一次）。之后 SMTP 首次给该用户投递邮件时会自动创建 `./mailbox/<用户名>/`。
+
+**Q4：用户名大小写 / 带域名能登录吗？**
+能。`USER Bob`、`USER bob@example.com`、`USER bob` 都会被规范化成 `bob` 再匹配账号和目录。
+
+**Q5：邮件都存到哪了？长什么样？**
+`./mailbox/<用户名>/时间戳_随机数.eml`，内容是标准 RFC 5322 邮件（头部区 + 空行 + 正文），普通文本编辑器可直接打开。
+
+**Q6：将来 Web 邮箱系统怎么和它对接？**
+浏览器不能直接连 2525/1110（浏览器只有 HTTP）。正确做法：你的 C++ Web 后端再写一份
+**SMTP 客户端**与 **POP3 客户端**，内部连接本机的 2525/1110 完成收发，再通过 HTTP 接口暴露给前端。
+（这也正是 README 规划中 `src/mail/mail_client.*` 要做的事。）
+
+**Q7：users.txt 什么时候会重新读取？**
+只在 `Pop3Server` 构造（服务器启动）时读一次。改了账号需要重启进程。
+
+---
+
+## 16. 后续规划（对照需求清单）
+
+- [x] SMTP 协议（EHLO/MAIL FROM/RCPT TO/DATA/QUIT）
+- [x] POP3 协议（USER/PASS/STAT/LIST/RETR/DELE/QUIT）
+- [x] 多用户独立邮箱目录、EML 落盘持久化
+- [ ] SMTP 客户端 + POP3 客户端（C++，供 Web 后端调用）
+- [ ] 邮件加密模块（≥2 种对称算法）
+- [ ] C++ HTTP 服务器 + Web 前端（B/S 架构收发界面）
+- [ ] 性能压测：100 次收发成功率 ≥ 99%
+
+---
+
+*本文档由仓库当前代码整理生成，如代码有改动请同步更新。*
+
