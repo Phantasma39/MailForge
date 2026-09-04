@@ -55,6 +55,7 @@ void Pop3Server::sendResponse(int fd, const std::string& response) {
 // 把 ./users.txt（格式：用户名:密码，一行一个，# 开头是注释）读进 accounts_
 // 文件不存在或里面一个有效账号都没有时，用内置默认账号兜底，保证第一次能跑起来
 void Pop3Server::loadAccounts() {
+    std::lock_guard<std::mutex> lock(accountsMutex_);   // 重读账号表前先加锁（多线程）
     // 先塞内置默认账号（bob / alice，密码都是 123456，方便第一次运行直接测试）
     accounts_.clear();
     accounts_["bob"]   = "123456";
@@ -103,6 +104,34 @@ void Pop3Server::loadAccounts() {
     } else {
         std::cerr << "[POP3] ./users.txt 中没有有效账号，继续使用内置默认账号" << std::endl;
     }
+}
+
+// ==================== 账号查询（支持"即时注册"） ====================
+
+// 判断某用户名是否在账号表里。
+// 如果内存表里没有：说明 users.txt 可能刚被 Web 注册接口 / 手工编辑改过，
+// 于是重新读一次文件再判断 —— 这样新注册的账号不用重启服务器就能登录。
+bool Pop3Server::isUserKnown(const std::string& userKey) {
+    {
+        std::lock_guard<std::mutex> lock(accountsMutex_);
+        if (accounts_.count(userKey) > 0) return true;
+    }
+    loadAccounts();   // 内存表没有 → 重新加载文件（函数内部会加锁）
+    std::lock_guard<std::mutex> lock(accountsMutex_);
+    return accounts_.count(userKey) > 0;
+}
+
+// 校验 用户名+密码。同上：内存表里没有这个用户时先重读文件再判断。
+bool Pop3Server::checkPassword(const std::string& userKey, const std::string& pass) {
+    {
+        std::lock_guard<std::mutex> lock(accountsMutex_);
+        auto it = accounts_.find(userKey);
+        if (it != accounts_.end()) return it->second == pass;
+    }
+    loadAccounts();
+    std::lock_guard<std::mutex> lock(accountsMutex_);
+    auto it = accounts_.find(userKey);
+    return it != accounts_.end() && it->second == pass;
 }
 
 // 把登录名规范成"小写 + 只留 @ 前部分"：
@@ -302,7 +331,7 @@ bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) 
             if (st.userKey.empty()) {
                 sendResponse(fd, "-ERR invalid mailbox name");
                 st.username.clear();
-            } else if (accounts_.count(st.userKey)) {
+            } else if (isUserKnown(st.userKey)) {
                 sendResponse(fd, "+OK User " + st.userKey + " known");
             } else {
                 // 用户不在账号表里。真实服务器通常也回 +OK（防止探测账号是否存在），
@@ -317,9 +346,10 @@ bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) 
                 sendResponse(fd, "-ERR USER command needed first");
                 return true;
             }
-            // 去账号表里查：用户名匹配 && 密码一致才算通过
-            auto it = accounts_.find(st.userKey);
-            if (it != accounts_.end() && it->second == args) {
+            // 去账号表里查：用户名匹配 && 密码一致才算通过。
+            // 若账号表里还没有这个用户（比如刚在网页上注册），checkPassword 会
+            // 自动重读一次 users.txt，所以新账号无需重启服务器即可登录。
+            if (checkPassword(st.userKey, args)) {
                 st.authed = true;
 
                 // 顺手建一下收件目录（即使还没有邮件，也让用户的邮箱目录先存在）

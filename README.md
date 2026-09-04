@@ -27,6 +27,7 @@
 | HTTP 服务器 | `HttpServer`：8080 端口，浏览器入口（手写 HTTP/1.1 解析） | ✅ 已实现 |
 | REST 接口 | 登录/发信/收件箱/读信/删信 5 组 JSON 接口 | ✅ 已实现 |
 | Web 演示页 | `web/index.html`：浏览器直接收发测试 | ✅ 已实现 |
+| 用户注册 | `POST /api/register`：网页注册 → 写 users.txt + 建收件目录，**即时生效无需重启** | ✅ 已实现 |
 | 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
 
 ## 2. 端口约定
@@ -529,6 +530,9 @@ SMTP 发信是**分步**的（MAIL → RCPT → DATA），服务器需要把几�
 | 私有 | `bool sendAll(int, const char*, size_t)` | 同 SMTP：保证发完 |
 | 私有 | `void sendResponse(int, const std::string&)` | 发一行响应（自动补 `\r\n`） |
 | 私有 | `void loadAccounts()` | 读 `./users.txt` 填 `accounts_`（带内置默认账号兜底） |
+| 私有成员 | `std::mutex accountsMutex_` | 账号表互斥锁（Web 注册后会被重新加载，多线程安全） |
+| 私有 | `bool isUserKnown(userKey)` | 用户名是否存在；内存表没有时**自动重读 users.txt** |
+| 私有 | `bool checkPassword(userKey, pass)` | 校验密码；同上，先重读再判断 |
 | 私有 | `std::string normalizeUser(const std::string&) const` | 用户名规范化：小写 + 去 `@` 域名 |
 | 私有 | `std::string mailboxDir(const std::string&) const` | 由 userKey 拼收件目录路径 |
 | 私有 | `void loadUserMails(const std::string&, std::vector<Pop3Mail>&)` | 扫描目录生成邮箱快照 |
@@ -665,6 +669,16 @@ SMTP 发信是**分步**的（MAIL → RCPT → DATA），服务器需要把几�
 | 返回值 | 无 |
 | 行为 | ① 发问候 `+OK MailForge POP3 server ready`；② 创建本会话状态 `Pop3State st`；③ 行缓冲循环（与 SMTP 完全一致：`recv` 4KB → 按 `\n` 拆行 → 去 `\r` → `processCommand`）；④ 客户端断开或 `QUIT` 时关 socket 结束线程 |
 | 注意 | 断开连接 ≠ QUIT：**被 DELE 标记但没发 QUIT 就断线的邮件不会真删**，这是 POP3 协议防误删的设计 |
+
+### 9.17 账号即时注册支持（新增）
+
+为了让"网页注册的新账号不用重启服务器就能登录"，对账号表做了两点改动：
+
+- `accountsMutex_`：保护 `accounts_` 的互斥锁。
+- `isUserKnown()` / `checkPassword()`：USER / PASS 认证都改走这两个方法。
+  它们在内存表里**找不到该用户时，会自动重读一次 `users.txt`**（Web 注册接口正是把新账号
+  写进这个文件），所以新账号在认证的下一秒就能生效。
+- 代价：运行期间手工**删除** users.txt 里的账号不会立刻从内存消失，建议重启使删号生效。
 
 ---
 
@@ -816,7 +830,9 @@ Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦
 不会。本实现里只有客户端显式发 `DELE` 且正常 `QUIT` 才删文件；只 `RETR`（下载）不删信。对将来的 Web 邮箱很友好。
 
 **Q3：怎么新增一个用户？**
-在 `users.txt` 加一行 `新用户名:密码`，并重启服务器（`loadAccounts` 只在启动时执行一次）。之后 SMTP 首次给该用户投递邮件时会自动创建 `./mailbox/<用户名>/`。
+**推荐**：直接在网页底部"注册"表单输入用户名密码，注册接口会写入 `users.txt`、创建收件目录并**即时生效（无需重启）**。
+也可以手工在 `users.txt` 加一行 `新用户名:密码`——因为 POP3 认证遇到不认识的用户会自动重读文件，同样无需重启。
+之后 SMTP 首次给该用户投递邮件时会自动创建 `./mailbox/<用户名>/`。
 
 **Q4：用户名大小写 / 带域名能登录吗？**
 能。`USER Bob`、`USER bob@example.com`、`USER bob` 都会被规范化成 `bob` 再匹配账号和目录。
@@ -830,7 +846,8 @@ Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦
 （这也正是 README 规划中 `src/mail/mail_client.*` 要做的事。）
 
 **Q7：users.txt 什么时候会重新读取？**
-只在 `Pop3Server` 构造（服务器启动）时读一次。改了账号需要重启进程。
+登录时若内存账号表里找不到该用户，会自动重读 `users.txt`（这是"网页注册即时生效"的原理）。
+注意：运行期间从文件**删除**账号不会立刻从内存消失，要重启进程才彻底删掉。
 
 ---
 
@@ -987,6 +1004,7 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `route(req, resp)` | 请求；出参响应 | `void` | `/api/` 走接口，其余当静态文件 |
 | `handleStatic(req, resp)` | 同上 | `void` | 读 `web/` 目录下文件（首页 `/`→`index.html`，防 `..`） |
 | `handleApi(req, resp)` | 同上 | `void` | 按 method+path 分发到 6 个 handler |
+| `handleRegister` | — | — | `POST /api/register`：校验→查重→写 users.txt→建收件目录→自动登录 |
 | `handleLogin` | — | — | `POST /api/login`：用 POP3 客户端试登录本机 1110，成功则发 token |
 | `handleLogout` | — | — | 删 token |
 | `handleSend` | — | — | `POST /api/send`：拼邮件原文 →（可选加密）→ `SmtpClient` 发 2525 |
@@ -999,12 +1017,14 @@ bash build_client.sh         # ② 编译客户端演示程序
 **文件内（匿名命名空间）还有两个加密配套工具：**
 - `struct DecodedMail{encrypted, from, subject, display}` —— 解码结果。
 - `DecodedMail decodeMail(raw)` —— 把 .eml 切头部/正文：明文直接展示；正文带
-  `MailForge::ENC::XOR::` 签名头则调用 `MailCrypto::decryptPayload` 还原出主题+正文。
+  `MailForge::ENC::XOR::` 签名头则调用 `MailCrypto::decryptPayload` 还原出主题+正文，
+  并**保留原始头部（Date/To 等）**，仅把占位的 Subject 替换为解密后的真实主题。
 
 ### 18.3 REST 接口速查
 
 | 方法&路径 | 参数 | 返回 |
 |---|---|---|
+| `POST /api/register` | `user`,`pass` | `{"ok":true,"token":"...","msg":"注册成功，已自动登录"}` |
 | `POST /api/login` | `user`,`pass` | `{"ok":true,"token":"..."}` |
 | `POST /api/logout` | `token` | `{"ok":true}` |
 | `POST /api/send` | `token`,`to`,`subject`,`body`[`,`from`,`encrypt`] | `{"ok":true,"msg":...}` |

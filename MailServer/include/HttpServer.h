@@ -84,6 +84,7 @@ private:
     void handleApi(const HttpRequest& req, HttpResponse& resp);      // /api/xxx
 
     // 各 /api 接口的具体实现（handler）
+    void handleRegister(const HttpRequest& req, HttpResponse& resp); // POST /api/register
     void handleLogin(const HttpRequest& req, HttpResponse& resp);    // POST /api/login
     void handleLogout(const HttpRequest& req, HttpResponse& resp);   // POST /api/logout
     void handleSend(const HttpRequest& req, HttpResponse& resp);     // POST /api/send

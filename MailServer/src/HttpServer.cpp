@@ -91,8 +91,33 @@ DecodedMail decodeMail(const std::string& raw) {
     }
 
     dm.subject = loadSubject.empty() ? "(加密邮件)" : loadSubject;
-    dm.display = "From: " + dm.from + "\r\n"
-               + "Subject: " + dm.subject + "\r\n"
+
+    // ---- 重建展示文本：保留原头部区的 Date/To 等所有字段 ----
+    // 之前这里只拼了 From + Subject，导致加密邮件阅读时看不到 Date/To；
+    // 现在改为：原样保留头部每一行，仅把占位的 Subject 换成解密后的真实主题。
+    auto isSubjectHeader = [](const std::string& line) {
+        const std::string key = "Subject";
+        if (line.size() <= key.size() || line[key.size()] != ':') return false;
+        for (size_t i = 0; i < key.size(); ++i) {
+            if (tolower((unsigned char)line[i]) != tolower((unsigned char)key[i])) return false;
+        }
+        return true;
+    };
+
+    std::string newHeader;
+    {
+        std::istringstream iss(headerPart);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            if (isSubjectHeader(line)) continue;   // 去掉占位的 Subject: [加密邮件]
+            newHeader += line + "\r\n";
+        }
+    }
+
+    dm.display = newHeader
+               + "Subject: " + dm.subject + "\r\n"    // 换成解密后的真实主题
                + "\r\n" + loadBody;
     return dm;
 }
@@ -422,13 +447,68 @@ std::string HttpServer::parseHeader(const std::string& rawMail, const std::strin
     return value;
 }
 
+// ==================== 注册辅助（文件内匿名命名空间） ====================
+namespace {
+std::mutex gRegisterMutex;   // 注册接口并发保护：检查重名 + 写文件要整体原子进行
+
+// 去首尾空白
+std::string trimWs(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t");
+    return s.substr(b, e - b + 1);
+}
+
+// 规范化注册用户名：去空白 → 去 @ 域名 → 转小写，且只能由 字母/数字/_- . 组成
+std::string normalizeRegUser(const std::string& input) {
+    std::string u = trimWs(input);
+    size_t at = u.find('@');
+    if (at != std::string::npos) u = u.substr(0, at);
+    for (char& c : u) c = (char)tolower((unsigned char)c);
+    if (u.empty()) return "";
+    for (char c : u) {
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+               || c == '-' || c == '_' || c == '.';
+        if (!ok) return "";
+    }
+    if (u[0] == '.' || u.find("..") != std::string::npos) return "";
+    return u;
+}
+
+// users.txt 里是否已存在该用户名（逐行比较规范化后的名字）
+bool userExistsInFile(const std::string& user) {
+    std::ifstream f("./users.txt");
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string t = trimWs(line);
+        if (t.empty() || t[0] == '#') continue;
+        size_t c = t.find(':');
+        if (c == std::string::npos) continue;
+        if (normalizeRegUser(t.substr(0, c)) == user) return true;
+    }
+    return false;
+}
+
+// 把 用户名:密码 追加写进 users.txt
+bool appendUserToFile(const std::string& user, const std::string& pass) {
+    std::ofstream f("./users.txt", std::ios::app);
+    if (!f) return false;
+    f << user << ":" << pass << "\n";
+    return f.good();
+}
+} // namespace
+
 // ==================== REST API 入口 ====================
 
 // 根据 method + path 把请求分发给对应 handler
 void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
     resp.contentType = "application/json; charset=utf-8";
 
-    if (req.method == "POST" && req.path == "/api/login") {
+    if (req.method == "POST" && req.path == "/api/register") {
+        handleRegister(req, resp);
+    } else if (req.method == "POST" && req.path == "/api/login") {
         handleLogin(req, resp);
     } else if (req.method == "POST" && req.path == "/api/logout") {
         handleLogout(req, resp);
@@ -452,6 +532,54 @@ static std::string getParam(const HttpRequest& req, const std::string& key) {
     auto q = req.query.find(key);
     if (q != req.query.end()) return q->second;
     return "";
+}
+
+// ==================== POST /api/register ====================
+// 参数：user, pass
+// 流程：校验 → 查重 → 追加写 users.txt → 建收件目录 → 自动登录返回 token
+// （POP3 登录时会自动重读 users.txt，所以新账号立即生效，无需重启服务器）
+void HttpServer::handleRegister(const HttpRequest& req, HttpResponse& resp) {
+    std::string user = getParam(req, "user");
+    std::string pass = getParam(req, "pass");
+    if (user.empty() || pass.empty()) {
+        resp.body = jsonResult(false, "缺少 user 或 pass 参数");
+        return;
+    }
+    if (pass.size() < 4) {
+        resp.body = jsonResult(false, "密码太短，至少 4 位");
+        return;
+    }
+
+    std::string regUser;
+    {
+        std::lock_guard<std::mutex> lock(gRegisterMutex);   // 查重 + 写文件要连续
+        regUser = normalizeRegUser(user);
+        if (regUser.empty()) {
+            resp.body = jsonResult(false,
+                "用户名只能由字母/数字/_-.组成，且不能以点开头");
+            return;
+        }
+        if (userExistsInFile(regUser)) {
+            resp.body = jsonResult(false, "该用户名已被注册");
+            return;
+        }
+        if (!appendUserToFile(regUser, pass)) {
+            resp.body = jsonResult(false,
+                "写入 users.txt 失败：请确认在 MailServer 目录下运行");
+            return;
+        }
+    }
+
+    // 创建该用户的收件目录（如 ./mailbox/carol/）
+    mkdir(("./mailbox/" + regUser).c_str(), 0755);
+
+    // 自动登录：直接发 token（POP3 登录会自动重读 users.txt）
+    std::string token;
+    makeSession(regUser, pass, token);
+    std::cout << "[HTTP] 新用户注册成功: " << regUser << std::endl;
+
+    resp.body = std::string("{\"ok\":true,\"token\":\"") + token
+              + "\",\"msg\":\"注册成功，已自动登录\"}";
 }
 
 // ==================== POST /api/login ====================

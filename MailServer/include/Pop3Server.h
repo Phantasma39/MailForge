@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <mutex>
 
 // 表示用户邮箱里的"一封邮件"
 // 登录成功后，服务器会把该用户目录下的 .eml 全部读进内存做成快照，
@@ -66,6 +67,13 @@ protected:
 
 private:
     std::map<std::string, std::string> accounts_;   // 账号表：规范化用户名 → 密码
+    std::mutex accountsMutex_;                      // 保护账号表（Web 注册后会被重新加载）
+
+    // 该用户名是否存在（账号表里没有时自动重读 users.txt，让"网页注册"即时生效）
+    bool isUserKnown(const std::string& userKey);
+
+    // 校验密码是否正确（同上，账号表里没有时先重读文件再判断）
+    bool checkPassword(const std::string& userKey, const std::string& pass);
 
     // 保证一次把数据发完（send 不一定一次发完，可能被中断，要循环发），和 SMTP 完全一样
     bool sendAll(int fd, const char* data, size_t len);

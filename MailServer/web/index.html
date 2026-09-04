@@ -27,6 +27,16 @@
   <span id="loginMsg"></span>
 </div>
 
+<!-- 注册 -->
+<div class="card" id="cardReg">
+  <h3>🆕 还没有账号？注册一个</h3>
+  <input id="regUser" placeholder="用户名（字母数字，如 carol）">　
+  <input id="regPass" type="password" placeholder="密码（至少 4 位）">
+  <input id="regPass2" type="password" placeholder="再输一次密码">
+  <button onclick="doRegister()">注册并自动登录</button>
+  <span id="regMsg"></span>
+</div>
+
 <!-- 写信 -->
 <div class="card" id="cardSend" style="display:none">
   <h3>✉️ 写邮件</h3>
@@ -79,6 +89,24 @@ function showLoginState(){
   document.getElementById("cardSend").style.display   = TOKEN ? "" : "none";
   document.getElementById("cardInbox").style.display  = TOKEN ? "" : "none";
   if (TOKEN) loadInbox();
+}
+
+async function doRegister(){
+  const u  = document.getElementById("regUser").value.trim();
+  const p1 = document.getElementById("regPass").value;
+  const p2 = document.getElementById("regPass2").value;
+  if (!u || !p1){ setMsg("regMsg", "请填写用户名和密码", true); return; }
+  if (p1 !== p2){ setMsg("regMsg", "两次输入的密码不一致", true); return; }
+  const j = await post("/api/register", { user: u, pass: p1 });
+  setMsg("regMsg", j.msg, !j.ok);
+  if (j.ok){
+    TOKEN = j.token;
+    localStorage.setItem("mf_token", TOKEN);
+    document.getElementById("regUser").value = "";
+    document.getElementById("regPass").value = "";
+    document.getElementById("regPass2").value = "";
+    showLoginState();
+  }
 }
 
 async function doLogin(){
