@@ -24,8 +24,19 @@ cd "$(dirname "$0")"
 #   -I include             告诉编译器头文件在 include/ 目录
 g++ -std=c++17 -pthread -Wall -Wextra \
     -o mail_server \
-    main.cpp src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp \
+    main.cpp \
+    src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp \
+    src/SmtpClient.cpp src/Pop3Client.cpp src/MailCrypto.cpp \
+    src/HttpServer.cpp \
     -I include
 
+# 检查 g++ 是否成功（$? 是上一条命令的退出码），失败就停下来，别往下跑了
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "❌ 编译出错！请根据上面的报错信息修改代码。"
+    exit 1
+fi
+
 echo ""
-echo "编译完成！现在运行：  ./mail_server"
+echo "✅ 编译完成！现在运行：  ./mail_server"
+echo "  浏览器打开 http://localhost:8080 可以测试 Web 邮箱页面"

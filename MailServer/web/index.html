@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MailForge Web 邮箱（演示页）</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 20px auto; padding: 0 12px; }
+  pre  { background:#f5f5f5; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all; }
+  .card { border:1px solid #ddd; border-radius:8px; padding:14px; margin-bottom:14px; }
+  input, textarea, button { font-size:14px; padding:6px 8px; margin:2px 0; }
+  textarea { width:100%; height:90px; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { border:1px solid #ddd; padding:6px; text-align:left; }
+  .err { color:#c00; }
+</style>
+</head>
+<body>
+<h1>📧 MailForge Web 邮箱（接口演示页）</h1>
+
+<!-- 登录 -->
+<div class="card" id="cardLogin">
+  <h3>登录（账号在 MailServer/users.txt）</h3>
+  <input id="inUser" placeholder="用户名，如 bob">　
+  <input id="inPass" type="password" placeholder="密码，如 123456">
+  <button onclick="doLogin()">登录</button>
+  <button onclick="doLogout()">退出</button>
+  <span id="loginMsg"></span>
+</div>
+
+<!-- 写信 -->
+<div class="card" id="cardSend" style="display:none">
+  <h3>✉️ 写邮件</h3>
+  收件人:<input id="inTo" placeholder="如 alice@example.com" style="width:60%"><br>
+  主题  :<input id="inSubject" style="width:60%"><br>
+  正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
+  <label><input type="checkbox" id="inEncrypt"> 发送时加密（XOR 通道）</label><br>
+  <button onclick="doSend()">发送</button>
+  <span id="sendMsg"></span>
+</div>
+
+<!-- 收件箱 -->
+<div class="card" id="cardInbox" style="display:none">
+  <h3>📥 收件箱 <button onclick="loadInbox()">刷新</button></h3>
+  <table>
+    <tr><th>编号</th><th>发件人</th><th>主题</th><th>大小</th><th>加密</th><th></th></tr>
+    <tbody id="mailRows"></tbody>
+  </table>
+  <span id="inboxMsg"></span>
+</div>
+
+<!-- 阅读 -->
+<div class="card" id="cardRead" style="display:none">
+  <h3>📄 邮件内容 <button onclick="hideRead()">返回列表</button>
+      <button id="btnDelete" onclick="doDelete()">删除这封</button></h3>
+  <pre id="mailContent"></pre>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem("mf_token") || "";
+let CURRENT_N = 0;
+
+function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+
+async function post(path, obj){
+  const body = new URLSearchParams(obj);
+  const r = await fetch(path, { method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body: body.toString() });
+  return r.json();
+}
+
+function setMsg(id, text, isErr){
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = isErr ? "err" : "";
+}
+
+function showLoginState(){
+  document.getElementById("cardSend").style.display   = TOKEN ? "" : "none";
+  document.getElementById("cardInbox").style.display  = TOKEN ? "" : "none";
+  if (TOKEN) loadInbox();
+}
+
+async function doLogin(){
+  const user = document.getElementById("inUser").value.trim();
+  const pass = document.getElementById("inPass").value;
+  const j = await post("/api/login", { user, pass });
+  if (j.ok){ TOKEN = j.token; localStorage.setItem("mf_token", TOKEN); setMsg("loginMsg","登录成功"); showLoginState(); }
+  else setMsg("loginMsg", j.msg, true);
+}
+
+async function doLogout(){
+  if (TOKEN) await post("/api/logout", { token: TOKEN });
+  TOKEN = ""; localStorage.removeItem("mf_token"); showLoginState(); setMsg("loginMsg","已退出");
+}
+
+async function doSend(){
+  const obj = { token: TOKEN, to: inTo.value.trim(), subject: inSubject.value, body: inBody.value };
+  if (document.getElementById("inEncrypt").checked) obj.encrypt = "1";
+  const j = await post("/api/send", obj);
+  setMsg("sendMsg", j.msg, !j.ok);
+  if (j.ok) setTimeout(loadInbox, 300);
+}
+
+async function loadInbox(){
+  const r = await fetch("/api/inbox?token=" + encodeURIComponent(TOKEN));
+  const j = await r.json();
+  if (!j.ok){ setMsg("inboxMsg", j.msg, true); return; }
+  const tb = document.getElementById("mailRows");
+  tb.innerHTML = "";
+  for (const m of j.mails){
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + m.number + "</td><td>" + esc(m.from) + "</td><td>" + esc(m.subject)
+      + "</td><td>" + m.size + "</td><td>" + (m.encrypted ? "🔒" : "-")
+      + "</td><td><button onclick='readMail(" + m.number + ")'>阅读</button></td>";
+    tb.appendChild(tr);
+  }
+  setMsg("inboxMsg", "共 " + j.mails.length + " 封");
+}
+
+async function readMail(n){
+  CURRENT_N = n;
+  const r = await fetch("/api/mail?token=" + encodeURIComponent(TOKEN) + "&n=" + n);
+  const j = await r.json();
+  if (!j.ok){ alert(j.msg); return; }
+  document.getElementById("mailContent").textContent =
+    (j.encrypted ? "🔒 这封邮件是加密存储的，已自动解密显示：\n\n" : "") + j.raw;
+  document.getElementById("cardRead").style.display = "";
+}
+
+function hideRead(){ document.getElementById("cardRead").style.display = "none"; }
+
+async function doDelete(){
+  if (!confirm("确定删除第 " + CURRENT_N + " 封？")) return;
+  const j = await post("/api/delete", { token: TOKEN, n: CURRENT_N });
+  alert(j.msg);
+  hideRead(); loadInbox();
+}
+
+if (TOKEN) showLoginState();
+</script>
+</body>
+</html>

@@ -59,6 +59,14 @@ public:
                   const std::string& subject,
                   const std::string& body);
 
+    // ★ 发一封"完整原始邮件"：头部由调用方自己拼好，原文整段发出
+    // 用途：加密场景下，先对整封邮件加密（见 MailCrypto::encryptPayload），
+    //       再把密文作为 rawMail 发出去；服务器侧原样存盘。
+    // 返回值：true = 服务器已接受。
+    bool sendRawMail(const std::string& from,
+                     const std::string& to,
+                     const std::string& rawMail);
+
     // 主动关闭连接（析构函数也会自动调用，一般不用手动调）
     void close();
 
@@ -84,11 +92,8 @@ private:
     // 自动跳过 250-xxx 形式的多行响应
     bool waitReply(int expectCode);
 
-    // 把 头部+正文 按 SMTP 规则逐行发出去（正文做点填充），最后发单独的 "." 
-    bool sendData(const std::string& from,
-                  const std::string& to,
-                  const std::string& subject,
-                  const std::string& body);
+    // 把一整段文本按行发出去（每行做 SMTP 点填充），最后发单独的 "." 结束
+    bool sendRawContent(const std::string& rawMail);
 };
 
 #endif // SMTP_CLIENT_H

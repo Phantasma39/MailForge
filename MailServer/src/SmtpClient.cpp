@@ -147,10 +147,28 @@ void SmtpClient::close() {
 
 // ==================== 核心：发一封邮件 ====================
 
+// sendMail = 先拼好"带头部"的完整邮件原文，再走一次标准 SMTP 会话
 bool SmtpClient::sendMail(const std::string& from,
                           const std::string& to,
                           const std::string& subject,
                           const std::string& body) {
+    // ---- 1. 拼 RFC 5322 邮件原文：头部区 + 空行 + 正文 ----
+    std::string raw;
+    raw += "From: " + from + "\r\n";
+    raw += "To: " + to + "\r\n";
+    raw += "Subject: " + subject + "\r\n";
+    raw += "\r\n";                     // 空行：头部区结束的标志
+    raw += body;
+    if (!body.empty() && body.back() != '\n') raw += "\n";   // 保证正文以换行结尾
+
+    // ---- 2. 交给 sendRawMail 走完整 SMTP 会话 ----
+    return sendRawMail(from, to, raw);
+}
+
+// sendRawMail：走一次完整的 SMTP 发送会话，rawMail 原文整段发出
+bool SmtpClient::sendRawMail(const std::string& from,
+                             const std::string& to,
+                             const std::string& rawMail) {
     lastError_.clear();
 
     // 1. 建连，等服务器 220 问候
@@ -173,8 +191,8 @@ bool SmtpClient::sendMail(const std::string& from,
     if (!sendLine("DATA")) { close(); return false; }
     if (!waitReply(354)) { close(); return false; }
 
-    // 6. 发送 头部+正文，并以单独的 "." 结束
-    if (!sendData(from, to, subject, body)) { close(); return false; }
+    // 6. 把邮件原文逐行发出（自动点填充），以单独的 "." 结束
+    if (!sendRawContent(rawMail)) { close(); return false; }
 
     // 7. 服务器确认接收
     if (!waitReply(250)) { close(); return false; }
@@ -186,38 +204,30 @@ bool SmtpClient::sendMail(const std::string& from,
     return true;
 }
 
-// 把 头部区 + 空行 + 正文 逐行发给服务器，最后发单独的 "." 表示结束
-bool SmtpClient::sendData(const std::string& from,
-                          const std::string& to,
-                          const std::string& subject,
-                          const std::string& body) {
-    // ---- 头部区：From / To / Subject，每行一条命令的方式发出 ----
-    if (!sendLine("From: " + from)) return false;
-    if (!sendLine("To: " + to)) return false;
-    if (!sendLine("Subject: " + subject)) return false;
-    if (!sendLine("")) return false;   // 空行：分隔头部和正文（RFC 5322 必需）
-
-    // ---- 正文：按行拆分并做 SMTP 点填充 ----
-    // SMTP 规定：正文里以 "." 开头的行要写成 ".."，否则服务器会误以为是结束标记
-    std::vector<std::string> lines;   // 先按 \n 把正文切成一行行
+// 把一整段文本按行发出去：每行做 SMTP 点填充，最后发单独的 "." 表示结束
+bool SmtpClient::sendRawContent(const std::string& rawMail) {
+    // 按 \n 切行；顺带把 \r\n 里的 \r 去掉（下面统一补规范的 \r\n）
+    std::vector<std::string> lines;
     std::string cur;
-    for (char ch : body) {
+    for (char ch : rawMail) {
         if (ch == '\n') {
             lines.push_back(cur);
             cur.clear();
-        } else if (ch != '\r') {      // 顺手把 \r\n 里的 \r 去掉
+        } else if (ch != '\r') {
             cur += ch;
         }
     }
     if (!cur.empty()) lines.push_back(cur);
-    // 如果正文以换行结尾，拆出来的最后一个空行是"多余的"，去掉
-    if (!lines.empty() && lines.back().empty() && !body.empty() && body.back() == '\n') {
+    // 如果文本以换行结尾，拆出来的最后一个空行是"多余的"，去掉
+    if (!lines.empty() && lines.back().empty()
+        && !rawMail.empty() && rawMail.back() == '\n') {
         lines.pop_back();
     }
 
     for (const std::string& line : lines) {
         std::string send = line;
-        if (!send.empty() && send[0] == '.') send = "." + send;   // 点填充
+        // SMTP 点填充：以 "." 开头的行要写成 ".."，否则服务器会误以为正文结束
+        if (!send.empty() && send[0] == '.') send = "." + send;
         if (!sendLine(send)) return false;
     }
 

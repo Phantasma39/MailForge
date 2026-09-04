@@ -24,64 +24,80 @@
 | 并发连接 | 每个客户端一个线程（`std::thread`） | ✅ 已实现 |
 | SMTP 客户端库 | `SmtpClient`：主动连 2525 发信（C++ 类） | ✅ 已实现 |
 | POP3 客户端库 | `Pop3Client`：主动连 1110 登录、收信、删信（C++ 类） | ✅ 已实现 |
-| 邮件加密 / Web 前端 | 尚未实现，属于后续里程碑 | ⏳ 规划中 |
+| HTTP 服务器 | `HttpServer`：8080 端口，浏览器入口（手写 HTTP/1.1 解析） | ✅ 已实现 |
+| REST 接口 | 登录/发信/收件箱/读信/删信 5 组 JSON 接口 | ✅ 已实现 |
+| Web 演示页 | `web/index.html`：浏览器直接收发测试 | ✅ 已实现 |
+| 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
 
 ## 2. 端口约定
 
-| 服务 | 标准端口 | 本项目使用 | 原因 |
-|---|---|---|---|
-| SMTP（发信） | 25 | **2525** | 25 需要 root 权限且常被防火墙拦截；2525 是高端口，普通用户可直接监听 |
-| POP3（收信） | 110 | **1110** | 同上，110 也需要 root 权限 |
+| 服务 | 标准端口 | 本项目使用 | 谁连谁 | 原因 |
+|---|---|---|---|---|
+| SMTP（发信协议） | 25 | **2525** | 程序 ⇄ 程序 | 25 需 root 且常被防火墙拦；2525 高端口直接可监听 |
+| POP3（收信协议） | 110 | **1110** | 程序 ⇄ 程序 | 同上，110 也要 root |
+| HTTP（浏览器） | 80 | **8080** | 浏览器 → 本服务器 | 浏览器只能走 HTTP，这是它的唯一入口 |
 
-> 用 telnet / 邮件客户端 / Python 测试时，端口填 **2525 / 1110**。
+> - 协议层测试用 **2525 / 1110**（telnet / 邮件客户端 / Python）。
+> - 浏览器直接打开 **http://localhost:8080** 用演示页收发。
 
 ## 3. 架构总览
 
 ```
-                    ┌───────────────────────────────────────────────┐
-   SMTP 客户端 ────► │  MailServer（本仓库 MailServer/ 目录）            │
-   (Outlook/python)  │                                               │
-                    │   main.cpp                                     │
-                    │     ├── std::thread ──► Pop3Server::start()    │
-                    │     └── 主线程      ──► SmtpServer::start()    │
-                    │                                               │
-                    │   ┌────────────────────────────────────────┐   │
-                    │   │ Server（基类：socket→bind→listen→accept） │   │
-                    │   │     每来一个连接开线程调 handleClient()     │   │
-                    │   └───────────────▲──────────────▲──────────┘   │
-                    │                   │              │              │
-                    │         SmtpServer（2525）  Pop3Server（1110）   │
-                    │         processCommand     processCommand      │
-                    └───────────────────┼──────────────┼──────────────┘
-                                        ▼              ▼
-                                    ./mailbox/<用户名>/xxx.eml
-                                       （SMTP 写入 / POP3 读取）
+                  ┌─────────────────────────────────────────────────────────────┐
+   SMTP 客户端 ──► │  MailServer（本仓库 MailServer/ 目录）                          │
+   (Outlook/python)│                                                             │
+                  │  main.cpp：三个线程                                          │
+                  │    ├── std::thread ──► Pop3Server::start()（1110 收信）        │
+                  │    ├── std::thread ──► HttpServer::start()（8080 网页入口）     │
+                  │    └── 主线程      ──► SmtpServer::start()（2525 收信）        │
+                  │                                                             │
+                  │   ┌──────────────────────────────────────────────────────┐  │
+                  │   │ Server 基类（socket→bind→listen→accept→每连接一线程）      │  │
+                  │   └──────────▲───────────▲───────────▲──────────────────┘  │
+                  │              │           │           │                     │
+                  │       SmtpServer    Pop3Server   HttpServer                │
+                  │       (2525 协议)    (1110 协议)  (REST/JSON/静态页)          │
+                  │                                        │                   │
+                  │                SmtpClient ──发信──►  2525                  │
+                  │                Pop3Client  ──收信──►  1110                  │
+                  │                （HttpServer 内部扮演"客户端"）                 │
+                  └──────────────────────┬──────────────────────────────────────┘
+                                         ▼
+                                   ./mailbox/<用户名>/xxx.eml
+                             （SMTP 写入 / POP3 与 Web 读取，支持加密存储）
 ```
 
 设计要点：
 - **网络层与协议层分离**：`Server` 基类把 socket / bind / listen / accept / 多线程全部封装好；
-  子类只需重写纯虚函数 `handleClient()`，专心写协议。
-- **同一个存储**：SMTP 投递进 `./mailbox/<用户名>/`，POP3 登录后读的也是同一个目录，
-  收发天然打通，这就是"多邮箱账户隔离"。
+  子类（SMTP / POP3 / HTTP）只需重写纯虚函数 `handleClient()`。
+- **同一个存储**：SMTP 投递、POP3 读取、Web 收发全部围绕 `./mailbox/<用户名>/`，天然一致。
+- **浏览器不直接说邮件协议**：浏览器 → HTTP(8080) → HttpServer 内部用 `SmtpClient`/`Pop3Client`
+  转成 SMTP/POP3 命令 → 完成收发；加密钩子挂在 HttpServer 的发信/收信路径上（见 MailCrypto）。
 
 ## 4. 目录结构（按实际代码）
 
 ```
 MailForge/
-├── MailServer/                    # ★ 当前主线：邮件服务器
-│   ├── main.cpp                   # 程序入口：同时启动 SMTP(2525) + POP3(1110)
+├── MailServer/                    # ★ 当前主线：邮件服务器 + Web 后端
+│   ├── main.cpp                   # 程序入口：同时启动 SMTP(2525) + POP3(1110) + HTTP(8080)
 │   ├── include/
 │   │   ├── Server.h               # 网络基类 Server（纯虚函数 handleClient）
 │   │   ├── SmtpServer.h           # SMTP 服务器类 + SmtpMail 结构体
 │   │   ├── Pop3Server.h           # POP3 服务器类 + Pop3Mail / Pop3State 结构体
 │   │   ├── SmtpClient.h           # SMTP 客户端类（主动发信）
-│   │   └── Pop3Client.h           # POP3 客户端类（主动收信）+ Pop3MailInfo 结构体
+│   │   ├── Pop3Client.h           # POP3 客户端类（主动收信）+ Pop3MailInfo 结构体
+│   │   ├── HttpServer.h           # HTTP 服务器类（REST 接口 + 静态页）
+│   │   └── MailCrypto.h           # 加密模块（接口预留，XOR 已实现）
 │   ├── src/
 │   │   ├── Server.cpp             # Server 基类实现
 │   │   ├── SmtpServer.cpp         # SMTP 协议实现（状态机 + 落盘）
 │   │   ├── Pop3Server.cpp         # POP3 协议实现（状态机 + 读目录 + 删除）
-│   │   ├── SmtpClient.cpp         # SMTP 客户端实现
-│   │   └── Pop3Client.cpp         # POP3 客户端实现
+│   │   ├── SmtpClient.cpp         # SMTP 客户端实现（sendMail / sendRawMail）
+│   │   ├── Pop3Client.cpp         # POP3 客户端实现（login/stat/list/retr/dele/quit）
+│   │   ├── HttpServer.cpp         # HTTP 解析 + REST 路由 + 静态页 + 加密钩子
+│   │   └── MailCrypto.cpp         # 加密实现（Base64 + XOR，AES/RC4 留 TODO）
+│   ├── web/
+│   │   └── index.html             # Web 演示页（登录/写邮件/收件箱/读信/删信）
 │   ├── client_test.cpp            # SMTP/POP3 客户端 演示 + 自测程序
 │   ├── build.sh                   # 一键编译服务器 ./mail_server
 │   ├── build_client.sh            # 一键编译客户端演示 ./mail_client_test
@@ -109,7 +125,12 @@ MailForge/
 
 ```bash
 cd /home/phantasma/MailForge/MailServer
-g++ -std=c++17 -pthread -o mail_server main.cpp src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp -I include
+bash build.sh                # 推荐：一键编译（含服务器 + Web 后端）
+# 或者手动 g++（等价）：
+# g++ -std=c++17 -pthread -o mail_server main.cpp \
+#     src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp \
+#     src/SmtpClient.cpp src/Pop3Client.cpp src/MailCrypto.cpp \
+#     src/HttpServer.cpp -I include
 ```
 
 ### 5.2 运行
@@ -118,18 +139,22 @@ g++ -std=c++17 -pthread -o mail_server main.cpp src/Server.cpp src/SmtpServer.cp
 ./mail_server
 ```
 
-看到以下输出即成功（两个端口都在监听）：
+看到以下输出即成功（**三个端口都在监听**）：
 
-```
+```text
 [POP3] 已从 ./users.txt 加载 2 个账号
-==============================================
+===============================================
  MailForge MailServer 启动
-   SMTP 服务器：端口 2525（发邮件用）
-   POP3 服务器：端口 1110（收邮件用）
-==============================================
+   SMTP 服务器：端口 2525（邮件协议发信用）
+   POP3 服务器：端口 1110（邮件协议收信用）
+   HTTP 服务器：端口 8080（浏览器/Web 后端用）
+===============================================
 [服务器] 已启动，监听端口 2525
 [服务器] 已启动，监听端口 1110
+[服务器] 已启动，监听端口 8080
 ```
+
+浏览器打开 **http://localhost:8080** 即可用演示页登录收发邮件。
 
 ### 5.3 默认账号
 
@@ -728,7 +753,8 @@ mailbox/
 ### 12.4 `requirements.md` —— 课程需求文档
 
 原始课程需求（SMTP/POP3 收发、加密、性能指标等），与当前代码的**对照状态**：
-协议收发部分已完成，加密与 Web 端为后续里程碑。
+协议收发、多用户邮箱、HTTP 接口与 Web 演示页已完成；加密已具备接口 + XOR 可跑，
+AES/RC4 补全与正式前端属后续里程碑。
 
 ---
 
@@ -744,6 +770,8 @@ mailbox/
 | 4 | `SmtpServer::processCommand()` | `MAIL` 分支结束后悬空一个 `return true;` | `RCPT / DATA / QUIT` 全部**失效**（发信卡在 RCPT） | 把 `return true` 收进 `if(cmd=="MAIL")` 块内 |
 | 5 | `SmtpServer::processCommand()` | HELO 里 `else args;` 是无用语句 | 问候语里主机名恒为空 | 改为 `else domain = args;` |
 | 6 | `SmtpServer::saveMail()` | 所有邮件平铺存 `./mailbox/` | 无法按用户隔离，POP3 无意义 | 改为按收件人投递到 `./mailbox/<用户名>/`（新功能） |
+| 7 | `MailCrypto::base64Decode()` | 把编码时插入的换行 `\r\n` 当成了**结束符**直接 `break` | 密文超过 76 字符后解码被截断，解密出的内容尾部丢字节 | 换行/空格改为 `continue` 跳过，只有填充符 `=` 才结束 |
+| 8 | `HttpServer::decodeMail()` | 在文件内自由函数里调用**私有**的 `HttpServer::parseHeader` | 编译报错（类外访问 private），且旧的构建脚本没检查编译失败会误报成功 | `parseHeader` 改 public；`build.sh` 增加编译失败检查 |
 
 ---
 
@@ -759,12 +787,18 @@ mailbox/
 - 多用户隔离：`alice` 登录看不到 `bob` 的邮件；
 - 全链路：`SMTP 发信 → 自动投递到 ./mailbox/bob/ → POP3 登录收取`。
 
+**HTTP 层接口测试（14 项全部通过）**：静态首页、错误密码拒绝、token 会话、
+明文发送、**加密发送（XOR）**、收件箱带主题列表、加密邮件标记与**自动解密显示**、
+明文/加密删除、无效 token 拒绝等。
+
 复测命令：
 
 ```bash
 cd MailServer
-./mail_server &                 # 先启动服务器
-python3 /tmp/mail_test.py       # 端到端测试脚本（本机开发时用，见下）
+./mail_server &                 # 先启动服务器（2525 + 1110 + 8080）
+python3 /tmp/mail_test.py       # SMTP/POP3 协议层端到端测试
+python3 /tmp/http_test.py       # HTTP REST 接口测试（含加密通道）
+./mail_client_test              # C++ 客户端演示
 ```
 
 > `/tmp/mail_test.py` 是开发期间编写的端到端测试脚本（使用 Python 标准库 `smtplib` /
@@ -806,8 +840,9 @@ Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦
 - [x] POP3 协议（USER/PASS/STAT/LIST/RETR/DELE/QUIT）
 - [x] 多用户独立邮箱目录、EML 落盘持久化
 - [x] SMTP 客户端 + POP3 客户端（C++，供 Web 后端调用）
-- [ ] 邮件加密模块（≥2 种对称算法）
-- [ ] C++ HTTP 服务器 + Web 前端（B/S 架构收发界面）
+- [x] C++ HTTP 服务器 + REST 接口 + Web 演示页（`web/index.html`）
+- [ ] 加密算法补全：接口与 XOR 已可跑，待补 RC4 / AES-CBC（满足 ≥2 算法要求）
+- [ ] 前端美化 / 用户注册功能（可选加分项）
 - [ ] 性能压测：100 次收发成功率 ≥ 99%
 
 ---
@@ -913,6 +948,113 @@ cd MailServer
 bash build_client.sh         # ② 编译客户端演示程序
 ./mail_client_test           # ③ 跑「SMTP发 → POP3收 → 删 → 验证」
 ```
+
+---
+
+## 18. 代码详解 —— HTTP 服务器 / Web 后端（`MailServer/include/HttpServer.h` + `src/HttpServer.cpp`）
+
+### 18.1 `struct HttpRequest` / `struct HttpResponse`
+
+| 结构体 | 字段 | 含义 |
+|---|---|---|
+| `HttpRequest` | `method` | GET / POST |
+| | `path` | 请求路径（不含 `?query`） |
+| | `version` | HTTP/1.1 |
+| | `query` | `map`：URL 问号后的参数 |
+| | `form` | `map`：POST body 的 `a=b&c=d` 表单参数 |
+| `HttpResponse` | `status` / `statusText` | HTTP 状态码与文本（200 OK / 404 …） |
+| | `contentType` | 响应 Content-Type（JSON / HTML…） |
+| | `body` | 响应体 |
+
+### 18.2 `class HttpServer` 概览
+
+| 成员 | 类型 | 说明 |
+|---|---|---|
+| `sessions_` | `map<token, Session>` | 已登录会话表；`Session{user, pass}` 记录账号（演示用明文） |
+| `sessionsMutex_` | `mutex` | 保护会话表（多线程并发登录/退出） |
+| `handleClient(fd)` | 公开（override） | 每个浏览器连接：设超时 → 解析请求 → 路由 → 回响应 → 断开 |
+| `parseHeader(raw, name)` | 公开 static | 从邮件原文头部取字段（decodeMail 等复用，故 public） |
+
+**私有方法与作用（都已在第 17 章同款收发工具的基础上实现）：**
+
+| 方法 | 输入参数 | 返回值 | 作用 |
+|---|---|---|---|
+| `readLine(fd, line)` | socket；出参 line | `bool` | 读一行（去 `\r\n`） |
+| `readRequest(fd, req)` | socket；出参 req | `bool` | 解析 请求行 + 头部 + `Content-Length` body + 表单/query |
+| `parseKeyValues(raw, out)` | `a=b&c=d` 串；出参 map | `void` | 拆分键值对（URL 解码） |
+| `urlDecode(s)` | 原串 | `string` | `%XX` / `+` 解码 |
+| `sendHttp(fd, resp)` | socket；响应 | `void` | 拼 HTTP 响应头 + body 发回（`Connection: close`） |
+| `route(req, resp)` | 请求；出参响应 | `void` | `/api/` 走接口，其余当静态文件 |
+| `handleStatic(req, resp)` | 同上 | `void` | 读 `web/` 目录下文件（首页 `/`→`index.html`，防 `..`） |
+| `handleApi(req, resp)` | 同上 | `void` | 按 method+path 分发到 6 个 handler |
+| `handleLogin` | — | — | `POST /api/login`：用 POP3 客户端试登录本机 1110，成功则发 token |
+| `handleLogout` | — | — | 删 token |
+| `handleSend` | — | — | `POST /api/send`：拼邮件原文 →（可选加密）→ `SmtpClient` 发 2525 |
+| `handleInbox` | — | — | `GET /api/inbox`：POP3 `LIST` + 逐封 `RETR` → `decodeMail` → JSON 列表 |
+| `handleMail` | — | — | `GET /api/mail?n=`：RETR 一封 → `decodeMail` 返回展示文本 |
+| `handleDelete` | — | — | `POST /api/delete`：POP3 `DELE` + `QUIT`（真删） |
+| `makeSession` / `randomToken` / `loginAndGetSession` | — | — | 会话增查删 |
+| `jsonEscape` / `jsonResult` | — | — | 生成 JSON 字符串 |
+
+**文件内（匿名命名空间）还有两个加密配套工具：**
+- `struct DecodedMail{encrypted, from, subject, display}` —— 解码结果。
+- `DecodedMail decodeMail(raw)` —— 把 .eml 切头部/正文：明文直接展示；正文带
+  `MailForge::ENC::XOR::` 签名头则调用 `MailCrypto::decryptPayload` 还原出主题+正文。
+
+### 18.3 REST 接口速查
+
+| 方法&路径 | 参数 | 返回 |
+|---|---|---|
+| `POST /api/login` | `user`,`pass` | `{"ok":true,"token":"..."}` |
+| `POST /api/logout` | `token` | `{"ok":true}` |
+| `POST /api/send` | `token`,`to`,`subject`,`body`[`,`from`,`encrypt`] | `{"ok":true,"msg":...}` |
+| `GET /api/inbox` | `token`（URL 查询串） | `{"ok":true,"mails":[{number,size,subject,from,encrypted}]}` |
+| `GET /api/mail` | `token`,`n` | `{"ok":true,"number","encrypted","raw"}` |
+| `POST /api/delete` | `token`,`n` | `{"ok":true,"msg":...}` |
+| `GET /` | — | `web/index.html` 演示页 |
+
+---
+
+## 19. 代码详解 —— 加密模块（`MailServer/include/MailCrypto.h` + `src/MailCrypto.cpp`）
+
+> 这是"传输加密"的**统一入口 / 预留接口**。目前 XOR 完整可跑，AES / RC4 在源码里留有
+> 【TODO】分支位。加新算法时不用改动 HTTP 层，只动这个模块。
+
+### 19.1 命名空间与枚举
+
+| 条目 | 说明 |
+|---|---|
+| `enum CryptoAlgo { ALGO_NONE, ALGO_XOR, ALGO_RC4, ALGO_AES_CBC }` | 支持算法清单；后两个待实现 |
+| `const char* kEncMagicXor` | 加密签名头：`"MailForge::ENC::XOR::"`，解密靠它识别 |
+
+### 19.2 函数说明
+
+| 函数 | 输入参数 | 返回值 | 作用 |
+|---|---|---|---|
+| `encryptPayload(plain, key, algo)` | 明文；对称密钥；算法（默认 NONE） | 加密结果字符串 | NONE 原样返回；XOR 返回 `签名头 + Base64(XOR(明文))`；其余算法走默认明文兜底（【TODO】） |
+| `decryptPayload(cipher, key)` | 可能加密过的文本；密钥 | 解密明文 | 无签名头则原样返回；有则 Base64 解码 → XOR 还原 |
+| `base64Encode(data)` | 二进制/文本 | Base64 文本 | 每 76 字符插入 `\r\n`，避免超 SMTP 单行限制 |
+| `base64Decode(text)` | Base64 文本 | 解码字节串 | **忽略**换行/空格，遇 `=`（填充）停止 |
+| `xorCipher(data, key)` | 数据；密钥 | 异或结果 | 逐字节与循环密钥异或；空密钥则原样返回 |
+
+### 19.3 加密后的"落地格式"
+
+```
+Subject: [加密邮件]            ← 头部主题占位（明文，收件箱可显示）
+（空行）
+MailForge::ENC::XOR::xxxxxxxx  ← 正文 = 签名头 + Base64(异或密文)
+yyyyyyyy…（每 76 字符换行）
+```
+
+加密前把「真实主题 + 真实正文」打包成载荷 `Subject: 真实主题\r\n\r\n真实正文`，
+收件方读取时 `decodeMail()` 自动解密并还原成可读邮件（`encrypted=true` 会标记）。
+
+### 19.4 密钥 / 算法在哪配置
+
+- 密钥与算法常量在 `HttpServer.cpp` 顶部的匿名命名空间：
+  `kCryptoKey`（默认 `"MailForge-Course-Key-2026"`）、`kCryptoAlgo`（默认 XOR）。
+- 收发共用同一把密钥；以后做密钥管理时改成从配置文件读取即可。
+- 调用方通过 `/api/send` 的 `encrypt=1` 参数开启加密通道（`web/index.html` 里有勾选框演示）。
 
 ---
 
