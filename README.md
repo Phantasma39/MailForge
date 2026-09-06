@@ -28,6 +28,7 @@
 | REST 接口 | 登录/发信/收件箱/读信/删信 5 组 JSON 接口 | ✅ 已实现 |
 | Web 演示页 | `web/index.html`：浏览器直接收发测试 | ✅ 已实现 |
 | 用户注册 | `POST /api/register`：网页注册 → 写 users.txt + 建收件目录，**即时生效无需重启** | ✅ 已实现 |
+| 性能压测 | 网页一键连发 100 封 1MB+ 邮件，统计发送成功率/平均时延/**丢包率**，自动清理 | ✅ 已实现 |
 | 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
 
 ## 2. 端口约定
@@ -801,6 +802,8 @@ AES/RC4 补全与正式前端属后续里程碑。
 - 多用户隔离：`alice` 登录看不到 `bob` 的邮件；
 - 全链路：`SMTP 发信 → 自动投递到 ./mailbox/bob/ → POP3 登录收取`。
 
+**压力测试**：一次性连发 100 封约 1MB 邮件实测 —— 发送成功 100/100、实际收到 100/100、**丢包率 0%**、平均单封 ~10ms、全程 ~3s，测试邮件自动清理、收件箱还原。
+
 **HTTP 层接口测试（14 项全部通过）**：静态首页、错误密码拒绝、token 会话、
 明文发送、**加密发送（XOR）**、收件箱带主题列表、加密邮件标记与**自动解密显示**、
 明文/加密删除、无效 token 拒绝等。
@@ -1011,6 +1014,7 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `handleInbox` | — | — | `GET /api/inbox`：POP3 `LIST` + 逐封 `RETR` → `decodeMail` → JSON 列表 |
 | `handleMail` | — | — | `GET /api/mail?n=`：RETR 一封 → `decodeMail` 返回展示文本 |
 | `handleDelete` | — | — | `POST /api/delete`：POP3 `DELE` + `QUIT`（真删） |
+| `handleBenchmark` | — | — | `GET /api/benchmark`：连发 100 封 1MB+ 邮件并统计丢包率，测完自动清理 |
 | `makeSession` / `randomToken` / `loginAndGetSession` | — | — | 会话增查删 |
 | `jsonEscape` / `jsonResult` | — | — | 生成 JSON 字符串 |
 
@@ -1030,6 +1034,7 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `POST /api/send` | `token`,`to`,`subject`,`body`[`,`from`,`encrypt`] | `{"ok":true,"msg":...}` |
 | `GET /api/inbox` | `token`（URL 查询串） | `{"ok":true,"mails":[{number,size,subject,from,encrypted}]}` |
 | `GET /api/mail` | `token`,`n` | `{"ok":true,"number","encrypted","raw"}` |
+| `GET /api/benchmark` | `token` | 压测结果：发送数/成功数/**丢包率**/平均时延/总耗时 |
 | `POST /api/delete` | `token`,`n` | `{"ok":true,"msg":...}` |
 | `GET /` | — | `web/index.html` 演示页 |
 

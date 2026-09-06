@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -520,6 +521,8 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleInbox(req, resp);
     } else if (req.method == "GET" && req.path == "/api/mail") {
         handleMail(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/benchmark") {
+        handleBenchmark(req, resp);
     } else {
         resp.body = jsonResult(false, "未知接口: " + req.method + " " + req.path);
     }
@@ -794,3 +797,121 @@ void HttpServer::handleDelete(const HttpRequest& req, HttpResponse& resp) {
     resp.body = jsonResult(true, "已删除第 " + std::to_string(number) + " 封");
 }
 
+
+// ==================== GET /api/benchmark ====================
+// 性能压测：连发 100 封 >1MB 的邮件，统计发送成功数与"丢包率"
+// （丢包率 = 100 封里收件端没看到的占比），测完自动清理测试邮件。
+void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+
+    const int kCount = 100;             // 连续发送 100 封
+    const size_t kBodyBytes = 1050000;  // 正文约 1.05MB（确保单封 > 1MB）
+    std::string to   = session.user + "@example.com";
+    std::string from = to;
+
+    auto nowMs = []() -> long long {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // 1) 记录压测前的邮箱基准（封数）
+    int baseCount = 0;
+    long long baseBytes = 0;
+    {
+        Pop3Client cnt(kMailServerIp, kPop3Port);
+        if (!cnt.login(session.user, session.pass) || !cnt.stat(baseCount, baseBytes)) {
+            resp.body = jsonResult(false, "压测前读取邮箱失败，请确认账号密码正确");
+            return;
+        }
+        cnt.quit();
+    }
+
+    // 2) 构造约 1.05MB 的正文（单行 998 字符，避开 SMTP 单行 1000 字节限制）
+    std::string body;
+    body.reserve(kBodyBytes + 8);
+    std::string unit(998, 'A');
+    while (body.size() < kBodyBytes) {
+        body += unit;
+        body += '\n';
+    }
+
+    // 3) 连续发送 100 封并逐封计时
+    long long startMs = nowMs();
+    int smtpOk = 0, smtpFail = 0;
+    long long totalLatencyMs = 0;
+    std::cout << "[HTTP] 压测开始：" << session.user << " 连发 " << kCount
+              << " 封 " << (body.size() / 1024) << "KB 邮件..." << std::endl;
+
+    for (int i = 0; i < kCount; ++i) {
+        long long t0 = nowMs();
+        SmtpClient smtp(kMailServerIp, kSmtpPort);
+        std::string subject = "[压测] 第 " + std::to_string(i + 1)
+                            + "/" + std::to_string(kCount) + " 封";
+        bool ok = smtp.sendMail(from, to, subject, body);
+        long long el = nowMs() - t0;
+        if (ok) { ++smtpOk; totalLatencyMs += el; }
+        else {
+            ++smtpFail;
+            std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
+                      << smtp.getLastError() << std::endl;
+        }
+        // 每 10 封稍歇 200ms，避免把服务线程积压得太凶
+        if (i % 10 == 9) usleep(200 * 1000);
+    }
+    long long sendMs = nowMs() - startMs;
+
+    // 4) 收件端统计：压测前后封数差 = 实际送达的封数
+    int afterCount = 0;
+    long long afterBytes = 0;
+    int received = 0;
+    {
+        Pop3Client cnt(kMailServerIp, kPop3Port);
+        if (cnt.login(session.user, session.pass) && cnt.stat(afterCount, afterBytes)) {
+            received = afterCount - baseCount;
+            if (received < 0) received = 0;
+        }
+        cnt.quit();
+    }
+    int lost = kCount - received;                 // 收件端没看到的封数
+    double lossRate = (lost * 100.0) / kCount;    // 丢包率(%) = 丢失/总数
+    double avgLatencyMs = smtpOk > 0 ? (double)totalLatencyMs / smtpOk : 0.0;
+    std::cout << "[HTTP] 压测结束：发送成功 " << smtpOk << "/" << kCount
+              << "，实际收到 " << received << "，丢包率 " << lossRate
+              << "% （发送耗时 " << (sendMs / 1000) << "s）" << std::endl;
+
+    // 5) 自动清理测试邮件（多出来的那几封，位于列表末尾）
+    if (received > 0) {
+        Pop3Client cleaner(kMailServerIp, kPop3Port);
+        if (cleaner.login(session.user, session.pass)) {
+            std::vector<Pop3MailInfo> list;
+            if (cleaner.list(list)) {
+                int deleted = 0;
+                for (size_t i = list.size(); i > 0 && deleted < received; --i) {
+                    if (cleaner.dele(list[i - 1].number)) ++deleted;
+                }
+                std::cout << "[HTTP] 压测清理：删除 " << deleted
+                          << " 封测试邮件，收件箱已还原" << std::endl;
+            }
+            cleaner.quit();
+        }
+    }
+
+    // 6) 返回 JSON 结果
+    resp.contentType = "application/json; charset=utf-8";
+    resp.body =
+        std::string("{\"ok\":true")
+        + ",\"count\":" + std::to_string(kCount)
+        + ",\"sizeBytes\":" + std::to_string(body.size())
+        + ",\"smtpOk\":" + std::to_string(smtpOk)
+        + ",\"smtpFail\":" + std::to_string(smtpFail)
+        + ",\"received\":" + std::to_string(received)
+        + ",\"lost\":" + std::to_string(lost)
+        + ",\"lossRate\":" + std::to_string(lossRate)
+        + ",\"avgLatencyMs\":" + std::to_string(avgLatencyMs)
+        + ",\"totalMs\":" + std::to_string(nowMs() - startMs)
+        + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
+}

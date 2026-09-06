@@ -91,6 +91,7 @@ private:
     void handleInbox(const HttpRequest& req, HttpResponse& resp);    // GET /api/inbox
     void handleMail(const HttpRequest& req, HttpResponse& resp);     // GET /api/mail
     void handleDelete(const HttpRequest& req, HttpResponse& resp);   // POST /api/delete
+    void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
 
     // ---------- 业务辅助 ----------
     bool loginAndGetSession(const std::string& token,
