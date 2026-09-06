@@ -233,8 +233,8 @@ async function readMail(n){
     area.style.display = "";
     area.innerHTML = "📎 附件：";
     for (const a of j.attachments){
-      area.innerHTML += "<button onclick="downloadAttachment(" + CURRENT_N + "," + a.i
-        + ",'" + (a.filename||"file").replace(/'/g,"") + "')">⬇ "
+      area.innerHTML += "<button onclick='downloadAttachment(" + CURRENT_N + "," + a.i
+        + ",\"" + (a.filename || "file").replace(/['"]/g,"") + "\")'>⬇ "
         + esc(a.filename) + "</button> ";
     }
   } else area.style.display = "none";
