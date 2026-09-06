@@ -46,6 +46,7 @@ struct HttpResponse {
     int status = 200;                      // 状态码
     std::string statusText = "OK";         // 状态文本
     std::string contentType = "text/plain";
+    std::string extraHeaders;              // 额外的响应头（如附件下载的 Content-Disposition）
     std::string body;
 };
 
@@ -92,6 +93,7 @@ private:
     void handleMail(const HttpRequest& req, HttpResponse& resp);     // GET /api/mail
     void handleDelete(const HttpRequest& req, HttpResponse& resp);   // POST /api/delete
     void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
+    void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
 
     // ---------- 业务辅助 ----------
     bool loginAndGetSession(const std::string& token,

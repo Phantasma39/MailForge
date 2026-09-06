@@ -248,6 +248,7 @@ void HttpServer::sendHttp(int fd, const HttpResponse& resp) {
     std::ostringstream oss;
     oss << "HTTP/1.1 " << resp.status << " " << resp.statusText << "\r\n"
         << "Content-Type: " << resp.contentType << "\r\n"
+        << resp.extraHeaders
         << "Content-Length: " << resp.body.size() << "\r\n"
         << "Connection: close\r\n"
         << "\r\n"
@@ -501,6 +502,201 @@ bool appendUserToFile(const std::string& user, const std::string& pass) {
 }
 } // namespace
 
+
+// ==================== 附件 / MIME 辅助（文件内匿名命名空间） ====================
+namespace {
+
+// 把 CRLF 统一成 \n（解析 MIME 时更省事）
+std::string toLfText(const std::string& t) {
+    std::string out;
+    out.reserve(t.size());
+    for (char c : t) if (c != '\r') out += c;
+    return out;
+}
+
+std::string trimWsText(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t");
+    return s.substr(b, e - b + 1);
+}
+
+// 在头部区文本里取某个字段的值（大小写不敏感，取到空行停）
+std::string partHeaderValue(const std::string& block, const std::string& name) {
+    std::istringstream iss(block);
+    std::string line;
+    std::string key = name + ":";
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;
+        // 折叠续行：值可能跨多行，这里简单只取首行（附件头基本够用）
+        if (line.size() > key.size()) {
+            bool match = true;
+            for (size_t i = 0; i < key.size(); ++i) {
+                if (tolower((unsigned char)line[i]) != tolower((unsigned char)key[i])) { match = false; break; }
+            }
+            if (match) {
+                std::string v = line.substr(key.size());
+                size_t b = v.find_first_not_of(" \t");
+                if (b != std::string::npos) v = v.substr(b);
+                return v;
+            }
+        }
+    }
+    return "";
+}
+
+// 从 Content-Disposition 里取 filename="xxx" 或 filename=xxx
+std::string parseFilename(const std::string& disposition) {
+    size_t p = disposition.find("filename");
+    if (p == std::string::npos) return "";
+    std::string rest = disposition.substr(p + 8);
+    size_t eq = rest.find('=');
+    if (eq == std::string::npos) return "";
+    rest = rest.substr(eq + 1);
+    rest = trimWsText(rest);
+    if (!rest.empty() && rest[0] == '"') {
+        size_t q = rest.find('"', 1);
+        return q == std::string::npos ? rest.substr(1) : rest.substr(1, q - 1);
+    }
+    size_t semi = rest.find(';');
+    return trimWsText(semi == std::string::npos ? rest : rest.substr(0, semi));
+}
+
+// 从邮件正文里找第一个 boundary（在头部 Content-Type 里，或正文第一行 --xxx）
+bool findBoundary(const std::string& headerText, const std::string& bodyText, std::string& boundary) {
+    // 1) 先看头部 Content-Type: multipart/...; boundary="..."
+    std::string ct = partHeaderValue(headerText, "Content-Type");
+    size_t p = ct.find("boundary");
+    if (p != std::string::npos) {
+        std::string rest = ct.substr(p + 8);
+        size_t eq = rest.find('=');
+        if (eq != std::string::npos) {
+            rest = trimWsText(rest.substr(eq + 1));
+            if (!rest.empty() && rest[0] == '"') {
+                size_t q = rest.find('"', 1);
+                if (q != std::string::npos) rest = rest.substr(1, q - 1);
+            } else {
+                size_t semi = rest.find(';');
+                if (semi != std::string::npos) rest = rest.substr(0, semi);
+            }
+            rest = trimWsText(rest);
+            if (!rest.empty()) { boundary = rest; return true; }
+        }
+    }
+    // 2) 退而求其次：正文第一个非空行如果是 --xxx，xxx 就是 boundary
+    std::istringstream iss(bodyText);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string t = trimWsText(line);
+        if (t.empty()) continue;
+        if (t.compare(0, 2, "--") == 0 && t.size() > 2) {
+            boundary = t.substr(2);
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+// 一封附件邮件的信息（只放"真正的附件"，即 Content-Disposition: attachment）
+struct MimeAttachment {
+    std::string contentType;  // 如 application/octet-stream
+    std::string filename;     // 附件名
+    std::string encoding;     // base64 / 8bit...
+    std::string content;      // 未解码的内容
+};
+
+// 解析邮件原文，把 multipart 里的附件全部提取出来
+bool parseAttachments(const std::string& mailText, std::vector<MimeAttachment>& atts) {
+    atts.clear();
+    std::string txt = toLfText(mailText);
+    // 拆 头部区 / 正文区
+    size_t blank = txt.find("\n\n");
+    std::string headerText = txt;
+    std::string bodyText;
+    if (blank != std::string::npos) {
+        headerText = txt.substr(0, blank);
+        bodyText   = txt.substr(blank + 2);
+    }
+
+    std::string boundary;
+    if (!findBoundary(headerText, bodyText, boundary)) return false;
+    const std::string marker = "--" + boundary;
+
+    // 按 boundary 行切段，收集每一段（part）
+    std::vector<std::string> segments;
+    std::string cur;
+    bool inPart = false;
+    {
+        std::istringstream iss(bodyText);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::string t = trimWsText(line);
+            bool isMarker = (t == marker);
+            bool isEnd    = (t == marker + "--");
+            if (isMarker || isEnd) {
+                if (inPart && !cur.empty()) segments.push_back(cur);
+                cur.clear();
+                inPart = true;
+                if (isEnd) break;
+            } else if (inPart) {
+                cur += line + "\n";
+            }
+        }
+    }
+    // 兜底：最后一段若没被 flush 就补上
+    if (inPart && !cur.empty()) segments.push_back(cur);
+
+    for (std::string& seg : segments) {
+        std::string segLf = seg;
+        size_t b2 = segLf.find("\n\n");
+        std::string partHead = segLf;
+        std::string partBody;
+        if (b2 != std::string::npos) {
+            partHead = segLf.substr(0, b2);
+            partBody = segLf.substr(b2 + 2);
+        }
+        std::string disp = partHeaderValue(partHead, "Content-Disposition");
+        if (disp.find("attachment") == std::string::npos) continue;  // 只收真正的附件
+
+        MimeAttachment a;
+        a.contentType = partHeaderValue(partHead, "Content-Type");
+        if (a.contentType.empty()) a.contentType = "application/octet-stream";
+        a.filename    = parseFilename(disp);
+        a.encoding    = partHeaderValue(partHead, "Content-Transfer-Encoding");
+        a.content     = partBody;
+        if (a.filename.empty()) a.filename = "attachment.bin";
+        atts.push_back(a);
+    }
+    return true;
+}
+
+// 生成 multipart/mixed 正文区（文本段 + 附件段）
+std::string makeMultipartText(const std::string& boundary,
+                              const std::string& textBody,
+                              const std::string& filename,
+                              const std::string& fileB64) {
+    std::string out;
+    out += "--" + boundary + "\r\n";
+    out += "Content-Type: text/plain; charset=utf-8\r\n";
+    out += "Content-Transfer-Encoding: 8bit\r\n\r\n";
+    out += textBody;
+    if (textBody.empty() || textBody.back() != '\n') out += "\r\n";
+    out += "--" + boundary + "\r\n";
+    out += "Content-Type: application/octet-stream\r\n";
+    out += "Content-Disposition: attachment; filename=\"" + filename + "\"\r\n";
+    out += "Content-Transfer-Encoding: base64\r\n\r\n";
+    out += fileB64;
+    if (fileB64.empty() || fileB64.back() != '\n') out += "\r\n";
+    out += "--" + boundary + "--\r\n";
+    return out;
+}
+
+} // namespace
+
 // ==================== REST API 入口 ====================
 
 // 根据 method + path 把请求分发给对应 handler
@@ -523,6 +719,8 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleMail(req, resp);
     } else if (req.method == "GET" && req.path == "/api/benchmark") {
         handleBenchmark(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/attachment") {
+        handleAttachment(req, resp);
     } else {
         resp.body = jsonResult(false, "未知接口: " + req.method + " " + req.path);
     }
@@ -646,25 +844,50 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
 
     bool wantEncrypt = (getParam(req, "encrypt") == "1");
 
+    // ---- 附件参数（可选）：filename = 文件名，fileB64 = 文件内容的 Base64 ----
+    std::string filename = getParam(req, "filename");
+    std::string fileB64  = getParam(req, "fileB64");
+    bool hasAttach = !filename.empty() && !fileB64.empty();
+    if (hasAttach && fileB64.size() > 2800000) {   // 单封约 ≤2.1MB（课程要求）的余量保护
+        resp.body = jsonResult(false, "附件太大：单封邮件不能超过约 2.1MB");
+        return;
+    }
+
+    // ---- 组装"正文区"：纯文本，或 multipart（文本段 + base64 附件段）----
+    std::string boundary;
+    std::string mimeHeaders;   // 有附件时附加的 MIME 头
+    std::string payload;
+    if (hasAttach) {
+        boundary = "MailForgeBoundary" + std::to_string((long)time(nullptr))
+                 + std::to_string(rand());
+        payload = makeMultipartText(boundary, body, filename, fileB64);
+        mimeHeaders = std::string("MIME-Version: 1.0\r\n")
+                    + "Content-Type: multipart/mixed; boundary=\""
+                    + boundary + "\"\r\n";
+    } else {
+        payload = body + "\r\n";
+    }
+
     // ---- 拼一封标准邮件原文（头部区 + 空行 + 正文）----
     std::string mailSubject = subject;
-    std::string mailBody    = body + "\r\n";
     if (wantEncrypt) {
         // ===================== 加密挂钩点①（发送前） =====================
-        // 加密时把"主题 + 正文"整体打包成一个载荷并加密，放进邮件正文区；
-        // 头部只留 "Subject: [加密邮件]" 占位（信封地址 From/To 必须明文才能投递）。
-        // 收件方读取时 decodeMail() 会用同一把密钥自动解密还原主题与正文。
-        // 【TODO】换 AES/RC4：改 MailCrypto::encryptPayload 内的算法分支即可，这里不动。
+        // 加密时把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷加密；
+        // 头部只留 Subject: [加密邮件] 占位（信封 From/To 必须明文才能投递）。
+        // 读取端 decodeMail() 会解密还原主题与 multipart 正文，附件照常可下载。
+        // 【TODO】换 AES/RC4：改 MailCrypto::encryptPayload 分支即可，这里不动。
         mailSubject = "[加密邮件]";
-        std::string envelope = "Subject: " + subject + "\r\n\r\n" + body;
-        mailBody = MailCrypto::encryptPayload(envelope, kCryptoKey, kCryptoAlgo) + "\r\n";
+        std::string envelope = "Subject: " + subject + "\r\n\r\n" + payload;
+        payload = MailCrypto::encryptPayload(envelope, kCryptoKey, kCryptoAlgo) + "\r\n";
+        mimeHeaders.clear();   // 密文不再是 multipart，不能挂 MIME 头
     }
 
     std::string plain =
         "From: " + from + "\r\n"
         "To: " + to + "\r\n"
         "Subject: " + mailSubject + "\r\n"
-        "\r\n" + mailBody;
+        + mimeHeaders
+        + "\r\n" + payload;
 
     SmtpClient smtp(kMailServerIp, kSmtpPort);
     if (!smtp.sendRawMail(from, to, plain)) {
@@ -713,13 +936,16 @@ void HttpServer::handleInbox(const HttpRequest& req, HttpResponse& resp) {
         std::string subject = decoded.subject;
         std::string from    = decoded.from;
         bool encrypted      = decoded.encrypted;
+        bool hasAttach = decoded.display.find("Content-Disposition: attachment")
+                       != std::string::npos;
 
         if (i > 0) json += ",";
         json += "{\"number\":" + std::to_string(mails[i].number)
               + ",\"size\":" + std::to_string(mails[i].size)
               + ",\"subject\":\"" + jsonEscape(subject)
               + "\",\"from\":\"" + jsonEscape(from)
-              + "\",\"encrypted\":" + (encrypted ? "true" : "false") + "}";
+              + "\",\"encrypted\":" + (encrypted ? "true" : "false")
+              + ",\"attachment\":" + (hasAttach ? "true" : "false") + "}";
     }
     json += "]}";
 
@@ -760,9 +986,83 @@ void HttpServer::handleMail(const HttpRequest& req, HttpResponse& resp) {
     // ===================== 加密挂钩点③（读单封时解密） =====================
     DecodedMail decoded = decodeMail(raw);
 
+    // 顺带解析附件列表（multipart 里的 Content-Disposition: attachment 段）
+    std::vector<MimeAttachment> atts;
+    parseAttachments(decoded.display, atts);
+    std::string attJson = "\"attachments\":[";
+    for (size_t k = 0; k < atts.size(); ++k) {
+        if (k > 0) attJson += ",";
+        attJson += "{\"i\":" + std::to_string(k)
+                 + ",\"filename\":\"" + jsonEscape(atts[k].filename)
+                 + "\",\"type\":\"" + jsonEscape(atts[k].contentType) + "\"}";
+    }
+    attJson += "]";
+
     resp.body = "{\"ok\":true,\"number\":" + std::to_string(number)
               + ",\"encrypted\":" + (decoded.encrypted ? "true" : "false")
-              + ",\"raw\":\"" + jsonEscape(decoded.display) + "\"}";
+              + ",\"raw\":\"" + jsonEscape(decoded.display) + "\","
+              + attJson + "}";
+}
+
+// ==================== GET /api/attachment ====================
+// 参数：token, n（邮件编号）, i（附件下标，见 /api/mail 的 attachments）
+// 返回：附件二进制内容（带 Content-Disposition 下载头）
+void HttpServer::handleAttachment(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    int number = atoi(getParam(req, "n").c_str());
+    int index  = atoi(getParam(req, "i").c_str());
+    if (number <= 0 || index < 0) {
+        resp.body = jsonResult(false, "缺少合法的 n / i 参数");
+        return;
+    }
+
+    Pop3Client pop3(kMailServerIp, kPop3Port);
+    if (!pop3.login(session.user, session.pass)) {
+        resp.body = jsonResult(false, "POP3 登录失败: " + pop3.getLastError());
+        return;
+    }
+    std::string raw;
+    bool retrOk = pop3.retr(number, raw);
+    pop3.quit();
+    if (!retrOk) {
+        resp.body = jsonResult(false, "读取第 " + std::to_string(number) + " 封失败");
+        return;
+    }
+
+    DecodedMail decoded = decodeMail(raw);
+    std::vector<MimeAttachment> atts;
+    parseAttachments(decoded.display, atts);
+    if (index >= (int)atts.size()) {
+        resp.body = jsonResult(false, "该邮件没有这个附件下标");
+        return;
+    }
+    const MimeAttachment& a = atts[index];
+
+    // 按编码解码：base64 段还原成原始字节，其它原样返回
+    std::string data;
+    std::string enc;
+    for (char c : a.encoding) enc += (char)tolower((unsigned char)c);
+    if (enc.find("base64") != std::string::npos) {
+        data = MailCrypto::base64Decode(a.content);
+    } else {
+        data = a.content;
+    }
+
+    // 附件名消毒（去掉引号/换行，防止注入响应头）
+    std::string fn = a.filename;
+    for (char& c : fn) {
+        if (c == '"' || c == '\r' || c == '\n' || c == ';') c = '_';
+    }
+
+    resp.status      = 200;
+    resp.statusText  = "OK";
+    resp.contentType = a.contentType.empty() ? "application/octet-stream" : a.contentType;
+    resp.extraHeaders = "Content-Disposition: attachment; filename=\"" + fn + "\"\r\n";
+    resp.body = data;
 }
 
 // ==================== POST /api/delete ====================
@@ -799,8 +1099,8 @@ void HttpServer::handleDelete(const HttpRequest& req, HttpResponse& resp) {
 
 
 // ==================== GET /api/benchmark ====================
-// 性能压测：连发 100 封 >1MB 的邮件，统计发送成功数与"丢包率"
-// （丢包率 = 100 封里收件端没看到的占比），测完自动清理测试邮件。
+// 性能压测：连发 100 封带约 1MB 附件(multipart)的邮件，统计发送成功率与"丢包率"，
+// 测完自动清理测试邮件。
 void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
     Session session;
     if (!loginAndGetSession(getParam(req, "token"), session)) {
@@ -808,8 +1108,8 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    const int kCount = 100;             // 连续发送 100 封
-    const size_t kBodyBytes = 1050000;  // 正文约 1.05MB（确保单封 > 1MB）
+    const int kCount = 100;              // 连续发送 100 封
+    const size_t kFileBytes = 786432;    // 附件"原始文件"786KB → base64 后单封 >1MB
     std::string to   = session.user + "@example.com";
     std::string from = to;
 
@@ -818,7 +1118,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
-    // 1) 记录压测前的邮箱基准（封数）
+    // 1) 记录压测前的邮箱基准
     int baseCount = 0;
     long long baseBytes = 0;
     {
@@ -830,28 +1130,36 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         cnt.quit();
     }
 
-    // 2) 构造约 1.05MB 的正文（单行 998 字符，避开 SMTP 单行 1000 字节限制）
-    std::string body;
-    body.reserve(kBodyBytes + 8);
-    std::string unit(998, 'A');
-    while (body.size() < kBodyBytes) {
-        body += unit;
-        body += '\n';
-    }
+    // 2) 构造约 1MB 的"附件"邮件：模拟 786KB 文件内容 → base64 → MIME multipart
+    std::string fileContent(kFileBytes, 'Z');
+    std::string fileB64 = MailCrypto::base64Encode(fileContent);
+    std::string boundary = "MailForgeBench" + std::to_string((long)time(nullptr))
+                         + std::to_string(rand());
+    std::string mimeHeaders = std::string("MIME-Version: 1.0\r\n")
+                            + "Content-Type: multipart/mixed; boundary=\""
+                            + boundary + "\"\r\n";
+    std::string payload = makeMultipartText(boundary, "压测正文（带附件）",
+                                            "[压测附件].bin", fileB64);
+    const size_t mailBytes = payload.size() + 400;   // 单封落盘估算，>1MB
 
     // 3) 连续发送 100 封并逐封计时
     long long startMs = nowMs();
     int smtpOk = 0, smtpFail = 0;
     long long totalLatencyMs = 0;
     std::cout << "[HTTP] 压测开始：" << session.user << " 连发 " << kCount
-              << " 封 " << (body.size() / 1024) << "KB 邮件..." << std::endl;
+              << " 封 " << (mailBytes / 1024) << "KB 附件邮件..." << std::endl;
 
     for (int i = 0; i < kCount; ++i) {
         long long t0 = nowMs();
         SmtpClient smtp(kMailServerIp, kSmtpPort);
         std::string subject = "[压测] 第 " + std::to_string(i + 1)
                             + "/" + std::to_string(kCount) + " 封";
-        bool ok = smtp.sendMail(from, to, subject, body);
+        std::string raw =
+            "From: " + from + "\r\n"
+            "To: " + to + "\r\n"
+            "Subject: " + subject + "\r\n"
+            + mimeHeaders + "\r\n" + payload;
+        bool ok = smtp.sendRawMail(from, to, raw);
         long long el = nowMs() - t0;
         if (ok) { ++smtpOk; totalLatencyMs += el; }
         else {
@@ -859,12 +1167,11 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
                       << smtp.getLastError() << std::endl;
         }
-        // 每 10 封稍歇 200ms，避免把服务线程积压得太凶
         if (i % 10 == 9) usleep(200 * 1000);
     }
     long long sendMs = nowMs() - startMs;
 
-    // 4) 收件端统计：压测前后封数差 = 实际送达的封数
+    // 4) 收件端统计
     int afterCount = 0;
     long long afterBytes = 0;
     int received = 0;
@@ -876,14 +1183,14 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         }
         cnt.quit();
     }
-    int lost = kCount - received;                 // 收件端没看到的封数
-    double lossRate = (lost * 100.0) / kCount;    // 丢包率(%) = 丢失/总数
+    int lost = kCount - received;
+    double lossRate = (lost * 100.0) / kCount;
     double avgLatencyMs = smtpOk > 0 ? (double)totalLatencyMs / smtpOk : 0.0;
     std::cout << "[HTTP] 压测结束：发送成功 " << smtpOk << "/" << kCount
               << "，实际收到 " << received << "，丢包率 " << lossRate
               << "% （发送耗时 " << (sendMs / 1000) << "s）" << std::endl;
 
-    // 5) 自动清理测试邮件（多出来的那几封，位于列表末尾）
+    // 5) 清理测试邮件
     if (received > 0) {
         Pop3Client cleaner(kMailServerIp, kPop3Port);
         if (cleaner.login(session.user, session.pass)) {
@@ -900,12 +1207,12 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         }
     }
 
-    // 6) 返回 JSON 结果
+    // 6) JSON 结果
     resp.contentType = "application/json; charset=utf-8";
     resp.body =
         std::string("{\"ok\":true")
         + ",\"count\":" + std::to_string(kCount)
-        + ",\"sizeBytes\":" + std::to_string(body.size())
+        + ",\"sizeBytes\":" + std::to_string(mailBytes)
         + ",\"smtpOk\":" + std::to_string(smtpOk)
         + ",\"smtpFail\":" + std::to_string(smtpFail)
         + ",\"received\":" + std::to_string(received)
@@ -915,3 +1222,4 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         + ",\"totalMs\":" + std::to_string(nowMs() - startMs)
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
 }
+

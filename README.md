@@ -29,6 +29,7 @@
 | Web 演示页 | `web/index.html`：浏览器直接收发测试 | ✅ 已实现 |
 | 用户注册 | `POST /api/register`：网页注册 → 写 users.txt + 建收件目录，**即时生效无需重启** | ✅ 已实现 |
 | 性能压测 | 网页一键连发 100 封 1MB+ 邮件，统计发送成功率/平均时延/**丢包率**，自动清理 | ✅ 已实现 |
+| 邮件附件 | MIME multipart：发信带附件（可与加密叠加）、收件箱📎标记、附件列表、在线下载 | ✅ 已实现 |
 | 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
 
 ## 2. 端口约定
@@ -802,7 +803,7 @@ AES/RC4 补全与正式前端属后续里程碑。
 - 多用户隔离：`alice` 登录看不到 `bob` 的邮件；
 - 全链路：`SMTP 发信 → 自动投递到 ./mailbox/bob/ → POP3 登录收取`。
 
-**压力测试**：一次性连发 100 封约 1MB 邮件实测 —— 发送成功 100/100、实际收到 100/100、**丢包率 0%**、平均单封 ~10ms、全程 ~3s，测试邮件自动清理、收件箱还原。
+**压力测试（附件版）**：一次性连发 100 封带 ~1MB 附件(multipart)的邮件实测 —— 发送成功 100/100、实际收到 100/100、**丢包率 0%**、单封约 1.08MB、平均单封 ~40ms、全程 ~6s，测试邮件自动清理、收件箱还原。
 
 **HTTP 层接口测试（14 项全部通过）**：静态首页、错误密码拒绝、token 会话、
 明文发送、**加密发送（XOR）**、收件箱带主题列表、加密邮件标记与**自动解密显示**、
@@ -1015,6 +1016,7 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `handleMail` | — | — | `GET /api/mail?n=`：RETR 一封 → `decodeMail` 返回展示文本 |
 | `handleDelete` | — | — | `POST /api/delete`：POP3 `DELE` + `QUIT`（真删） |
 | `handleBenchmark` | — | — | `GET /api/benchmark`：连发 100 封 1MB+ 邮件并统计丢包率，测完自动清理 |
+| `handleAttachment` | — | — | `GET /api/attachment`：解析 multipart 并按 base64 还原附件供下载 |
 | `makeSession` / `randomToken` / `loginAndGetSession` | — | — | 会话增查删 |
 | `jsonEscape` / `jsonResult` | — | — | 生成 JSON 字符串 |
 
@@ -1024,6 +1026,11 @@ bash build_client.sh         # ② 编译客户端演示程序
   `MailForge::ENC::XOR::` 签名头则调用 `MailCrypto::decryptPayload` 还原出主题+正文，
   并**保留原始头部（Date/To 等）**，仅把占位的 Subject 替换为解密后的真实主题。
 
+**附件相关（同文件内匿名命名空间工具）：**
+- `makeMultipartText(boundary, textBody, filename, fileB64)`：生成 multipart/mixed 正文区（文本段 + base64 附件段）。
+- `parseAttachments(mailText, atts)`：解析 multipart，提取 `Content-Disposition: attachment` 的附件（名称/类型/编码/内容）。
+- `MimeAttachment{contentType, filename, encoding, content}`：一封附件的信息。
+
 ### 18.3 REST 接口速查
 
 | 方法&路径 | 参数 | 返回 |
@@ -1031,9 +1038,10 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `POST /api/register` | `user`,`pass` | `{"ok":true,"token":"...","msg":"注册成功，已自动登录"}` |
 | `POST /api/login` | `user`,`pass` | `{"ok":true,"token":"..."}` |
 | `POST /api/logout` | `token` | `{"ok":true}` |
-| `POST /api/send` | `token`,`to`,`subject`,`body`[`,`from`,`encrypt`] | `{"ok":true,"msg":...}` |
+| `POST /api/send` | `token`,`to`,`subject`,`body`[`,`from`,`encrypt`,`filename`,`fileB64`] | `{"ok":true,"msg":...}`（带 filename+fileB64 时按 multipart 附件发送） |
 | `GET /api/inbox` | `token`（URL 查询串） | `{"ok":true,"mails":[{number,size,subject,from,encrypted}]}` |
-| `GET /api/mail` | `token`,`n` | `{"ok":true,"number","encrypted","raw"}` |
+| `GET /api/mail` | `token`,`n` | `{"ok":true,"number","encrypted","raw","attachments":[{i,filename,type}]}` |
+| `GET /api/attachment` | `token`,`n`,`i` | 附件二进制内容（`Content-Disposition: attachment` 下载头） |
 | `GET /api/benchmark` | `token` | 压测结果：发送数/成功数/**丢包率**/平均时延/总耗时 |
 | `POST /api/delete` | `token`,`n` | `{"ok":true,"msg":...}` |
 | `GET /` | — | `web/index.html` 演示页 |

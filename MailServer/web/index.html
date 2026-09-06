@@ -44,6 +44,8 @@
   主题  :<input id="inSubject" style="width:60%"><br>
   正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
   <label><input type="checkbox" id="inEncrypt"> 发送时加密（XOR 通道）</label><br>
+  附件:<input type="file" id="inFile" onchange="onFilePick()">
+  <span id="fileInfo"></span><br>
   <button onclick="doSend()">发送</button>
   <span id="sendMsg"></span>
 </div>
@@ -72,6 +74,7 @@
 <div class="card" id="cardRead" style="display:none">
   <h3>📄 邮件内容 <button onclick="hideRead()">返回列表</button>
       <button id="btnDelete" onclick="doDelete()">删除这封</button></h3>
+  <div id="attArea"></div>
   <pre id="mailContent"></pre>
 </div>
 
@@ -133,12 +136,39 @@ async function doLogout(){
   TOKEN = ""; localStorage.removeItem("mf_token"); showLoginState(); setMsg("loginMsg","已退出");
 }
 
+let ATT = { filename: "", b64: "" };   // 待发送的附件
+
+function onFilePick(){
+  const f = document.getElementById("inFile").files[0];
+  const info = document.getElementById("fileInfo");
+  if (!f){ ATT = { filename:"", b64:"" }; info.textContent=""; return; }
+  if (f.size > 1400*1024){           // 原始文件 ≤1.4MB（base64 后仍不超 2.1MB 限制）
+    info.textContent = "文件太大（≤1.4MB）"; info.className = "err";
+    document.getElementById("inFile").value = ""; return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const ds = String(reader.result);
+    const b64 = ds.substring(ds.indexOf(",") + 1);
+    ATT = { filename: f.name, b64: b64 };
+    info.textContent = "已选: " + f.name + " (" + (f.size/1024).toFixed(0) + " KB)";
+    info.className = "";
+  };
+  reader.readAsDataURL(f);
+}
+
 async function doSend(){
   const obj = { token: TOKEN, to: inTo.value.trim(), subject: inSubject.value, body: inBody.value };
   if (document.getElementById("inEncrypt").checked) obj.encrypt = "1";
+  if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
   const j = await post("/api/send", obj);
   setMsg("sendMsg", j.msg, !j.ok);
-  if (j.ok) setTimeout(loadInbox, 300);
+  if (j.ok){
+    ATT = { filename:"", b64:"" };
+    document.getElementById("inFile").value = "";
+    document.getElementById("fileInfo").textContent = "";
+    setTimeout(loadInbox, 300);
+  }
 }
 
 async function loadInbox(){
@@ -150,7 +180,7 @@ async function loadInbox(){
   for (const m of j.mails){
     const tr = document.createElement("tr");
     tr.innerHTML = "<td>" + m.number + "</td><td>" + esc(m.from) + "</td><td>" + esc(m.subject)
-      + "</td><td>" + m.size + "</td><td>" + (m.encrypted ? "🔒" : "-")
+      + "</td><td>" + m.size + "</td><td>" + (m.encrypted ? "🔒 " : "") + (m.attachment ? "📎" : "-")
       + "</td><td><button onclick='readMail(" + m.number + ")'>阅读</button></td>";
     tb.appendChild(tr);
   }
@@ -198,7 +228,28 @@ async function readMail(n){
   if (!j.ok){ alert(j.msg); return; }
   document.getElementById("mailContent").textContent =
     (j.encrypted ? "🔒 这封邮件是加密存储的，已自动解密显示：\n\n" : "") + j.raw;
+  const area = document.getElementById("attArea");
+  if (j.attachments && j.attachments.length){
+    area.style.display = "";
+    area.innerHTML = "📎 附件：";
+    for (const a of j.attachments){
+      area.innerHTML += "<button onclick="downloadAttachment(" + CURRENT_N + "," + a.i
+        + ",'" + (a.filename||"file").replace(/'/g,"") + "')">⬇ "
+        + esc(a.filename) + "</button> ";
+    }
+  } else area.style.display = "none";
   document.getElementById("cardRead").style.display = "";
+}
+
+async function downloadAttachment(n, i, name){
+  const r = await fetch("/api/attachment?token=" + encodeURIComponent(TOKEN)
+                        + "&n=" + n + "&i=" + i);
+  if (!r.ok){ alert("下载失败"); return; }
+  const blob = await r.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name || ("attachment" + i);
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 function hideRead(){ document.getElementById("cardRead").style.display = "none"; }
