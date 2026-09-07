@@ -239,6 +239,11 @@
             <div class="msg" id="readMsg"></div>
           </div>
           <div id="attArea" style="display:none; margin-bottom:12px"></div>
+          <details id="rawToggle" style="margin-bottom:12px">
+            <summary style="cursor:pointer; color:var(--accent)">查看邮件原文（含 base64 附件）</summary>
+            <pre class="mail-view-body mono" id="rawContent"
+                 style="max-height:320px; overflow:auto; background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0 0"></pre>
+          </details>
           <div class="mail-view-body" id="mailContent"></div>
         </div>
       </section>
@@ -445,6 +450,61 @@ function backToList(){
   $("readPane").style.display = "none";
 }
 
+// 从邮件头部取某个字段的值（大小写不敏感）
+function headField(head, name){
+  const re = new RegExp("^" + name + "\\s*:\\s*(.*)$", "im");
+  const m = head.match(re);
+  return m ? m[1] : "";
+}
+
+// 把一封邮件的显示正文解析出来：
+//   1) 先切出 头部/正文 分隔（\r\n\r\n 或 \n\n）；
+//   2) 若正文是 multipart，只取 text/plain 部分的内容（附件 base64 不进正文）；
+//   3) 普通文本邮件直接返回正文。
+function visibleBodyText(raw){
+  let sep = raw.indexOf("\r\n\r\n");
+  let gap = 4;
+  if (sep < 0){ sep = raw.indexOf("\n\n"); gap = 2; }
+  if (sep < 0) return raw;
+  const body = raw.slice(sep + gap);
+
+  // 非 multipart：整段就是正文
+  if (body.indexOf("--") !== 0) return body;
+
+  // multipart：第一个非空行就是边界分隔线，如 --MailForgeBoundaryxxx
+  const nl = body.indexOf("\n");
+  const bnd = (nl >= 0 ? body.slice(0, nl) : body).replace(/\r$/, "");
+  if (bnd.indexOf("--") !== 0) return body;
+  if (bnd.length < 4) return body;
+
+  const parts = body.split(bnd);
+  for (const part of parts){
+    if (!part || !part.trim()) continue;
+    const i1 = part.indexOf("\r\n\r\n");
+    const i2 = part.indexOf("\n\n");
+    let hi, ci;
+    if (i1 >= 0 && (i2 < 0 || i1 < i2)){ hi = i1; ci = i1 + 4; }
+    else if (i2 >= 0){ hi = i2; ci = i2 + 2; }
+    else continue;                       // 没有头部结束空行，跳过
+    const ph = part.slice(0, hi);
+    if (!/content-type\s*:\s*text\/plain/i.test(ph)) continue;   // 只要文本段
+    let content = part.slice(ci);
+    content = content.replace(/\r?\n?$/, "");
+    // 少数情况文本段用 base64 传输：解码成 UTF-8 再显示
+    if (/content-transfer-encoding\s*:\s*base64/i.test(ph)){
+      try{
+        const clean = content.replace(/\s+/g, "");
+        const bin = atob(clean);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; ++i) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder("utf-8").decode(bytes);
+      }catch(e){ return content; }
+    }
+    return content;
+  }
+  return body;   // 找不到 text/plain 段时退回原样
+}
+
 async function readMail(n){
   CURRENT_N = n;
   const r = await fetch("/api/mail?token=" + encodeURIComponent(TOKEN) + "&n=" + n);
@@ -454,12 +514,24 @@ async function readMail(n){
   $("inboxListPane").style.display = "none";
   $("readPane").style.display = "";
   $("readMsg").textContent = ""; $("readMsg").className = "msg";
-  let subj = j.raw.match(/^Subject:\s*(.*)$/mi)?.[1];
-  if (!subj) subj = j.encrypted ? "(加密邮件，主题不可见)" : "(无主题)";
+
+  const sepIdx = j.raw.indexOf("\r\n\r\n");
+  const head = sepIdx >= 0 ? j.raw.slice(0, sepIdx) : j.raw;
+  const subj = headField(head, "Subject") ||
+               (j.encrypted ? "(加密邮件，主题不可见)" : "(无主题)");
+  const from = headField(head, "From");
+  const to   = headField(head, "To");
+
   $("readSubject").textContent = (j.encrypted ? "🔒 " : "") + subj;
-  $("readFrom").textContent = "发件人: " + (j.raw.match(/^From:\s*(.*)$/mi)?.[1] || "");
-  $("readMeta").textContent = j.encrypted ? "加密存储 · 已自动解密显示" : "";
-  $("mailContent").textContent = j.raw;
+  $("readFrom").textContent = "发件人: " + (from || "(未知)");
+  $("readMeta").textContent = (to ? "收件人: " + to + "  ·  " : "")
+                            + (j.encrypted ? "加密存储 · 已自动解密显示" : "");
+
+  // 正文只显示文本部分，附件 base64 不会混进来
+  $("mailContent").textContent = visibleBodyText(j.raw) || "(无正文)";
+  // 原文（含 base64 附件）折叠保留，便于协议调试
+  $("rawContent").textContent = j.raw;
+  $("rawToggle").open = false;
 
   const area = $("attArea");
   if (j.attachments && j.attachments.length){
