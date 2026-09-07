@@ -1,0 +1,22 @@
+# 构建产物（Windows / MSYS2 / WSL）
+*.o
+*.exe
+*.a
+*.lib
+*.dll
+*.out
+
+# 运行时密钥与数据（勿提交）
+keys/
+*.pem
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE / 系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
