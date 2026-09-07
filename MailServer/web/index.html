@@ -224,6 +224,11 @@ async function runBench(){
                           + "&encrypt=" + encodeURIComponent(mode));
     const j = await r.json();
     if (!j.ok){ msg.textContent = j.msg; msg.className = "err"; return; }
+    if (!j || !Array.isArray(j.modes)){
+      msg.textContent = "服务器返回的是旧版压测结果（缺少 modes）：当前 mail_server 进程是旧版本。请先停止旧进程并重新编译启动：make clean && make run（或 pkill mail_server 后 make run）";
+      msg.className = "err";
+      return;
+    }
     msg.textContent = "";
     const mb = (j.sizeBytes / 1048576).toFixed(2);
     const sec = (j.totalMs / 1000).toFixed(1);
