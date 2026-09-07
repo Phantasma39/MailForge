@@ -2,110 +2,285 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>MailForge Web 邮箱（演示页）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MailForge 邮箱</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 20px auto; padding: 0 12px; }
-  pre  { background:#f5f5f5; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all; }
-  .card { border:1px solid #ddd; border-radius:8px; padding:14px; margin-bottom:14px; }
-  input, textarea, button { font-size:14px; padding:6px 8px; margin:2px 0; }
-  textarea { width:100%; height:90px; }
-  table { width:100%; border-collapse:collapse; }
-  td, th { border:1px solid #ddd; padding:6px; text-align:left; }
-  .err { color:#c00; }
+  :root{
+    --bg:#eef1f6; --panel:#fff; --line:#e3e8ef; --text:#1f2937; --muted:#6b7280;
+    --accent:#2563eb; --accent-weak:#eff4ff; --ok:#059669; --err:#dc2626;
+    --radius:10px;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    font-size:14px; line-height:1.6;
+  }
+  h1,h2,h3{ margin:0; font-weight:600; }
+  button{ font:inherit; cursor:pointer; }
+  input,select,textarea{ font:inherit; color:var(--text); }
+  a{ color:var(--accent); text-decoration:none; }
+  a:hover{ text-decoration:underline; }
+
+  header.topbar{
+    background:var(--panel); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:10;
+  }
+  .topbar-inner{
+    max-width:1100px; margin:0 auto; padding:10px 20px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .brand{ display:flex; align-items:center; gap:10px; font-size:18px; font-weight:700; }
+  .brand-logo{
+    width:30px; height:30px; border-radius:8px; background:var(--accent); color:#fff;
+    display:flex; align-items:center; justify-content:center; font-size:15px;
+  }
+  .account{ display:none; align-items:center; gap:10px; }
+  .avatar{
+    width:30px; height:30px; border-radius:50%; background:var(--accent-weak);
+    color:var(--accent); font-weight:600; display:flex; align-items:center;
+    justify-content:center; text-transform:uppercase;
+  }
+  .who{ display:flex; flex-direction:column; line-height:1.25; }
+  .who .mail{ color:var(--muted); font-size:12px; }
+
+  .wrap{ max-width:1100px; margin:0 auto; padding:20px; }
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px; margin-bottom:16px;
+  }
+  .app{ display:grid; grid-template-columns:210px 1fr; gap:16px; align-items:start; }
+  aside.side{ position:sticky; top:66px; }
+  .side-inner{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:10px; }
+  .nav-btn{
+    display:block; width:100%; text-align:left; padding:9px 12px; border:0;
+    background:transparent; border-radius:8px; color:var(--text); margin-bottom:2px;
+  }
+  .nav-btn:hover{ background:#f3f4f6; }
+  .nav-btn.on{ background:var(--accent-weak); color:var(--accent); font-weight:600; }
+  .side-hr{ height:1px; background:var(--line); margin:10px 2px; }
+  .side-note{ font-size:12px; color:var(--muted); padding:2px 12px 8px; }
+  .btn{
+    border:1px solid var(--line); background:#fff; color:var(--text);
+    padding:7px 14px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+  }
+  .btn:hover{ background:#f6f8fb; }
+  .btn.primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.primary:hover{ opacity:.92; }
+  .btn.danger{ color:var(--err); }
+  .btn:disabled{ opacity:.55; cursor:not-allowed; }
+  .btn.sm{ padding:4px 10px; font-size:13px; }
+  .field{ margin-bottom:12px; }
+  .field label{ display:block; font-size:13px; color:var(--muted); margin-bottom:4px; }
+  .field input, .field textarea, .field select{
+    width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px;
+    background:#fff; outline:none;
+  }
+  .field input:focus,.field textarea:focus,.field select:focus{ border-color:var(--accent); }
+  .field textarea{ resize:vertical; min-height:150px; }
+  .msg{ font-size:13px; margin-top:8px; min-height:18px; }
+  .msg.err{ color:var(--err); }
+  .msg.ok{ color:var(--ok); }
+  .muted{ color:var(--muted); }
+  .pill{ display:inline-block; padding:0 8px; border-radius:99px; font-size:12px; line-height:20px; }
+  .pill.enc{ background:#fef3c7; color:#92400e; }
+  .pill.att{ background:#eef2ff; color:#3730a3; }
+  .rowbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .view{ display:none; }
+  .view.on{ display:block; }
+
+  .authbox{ max-width:400px; margin:44px auto; }
+  .auth-head{ text-align:center; margin-bottom:16px; }
+  .auth-head h2{ font-size:22px; }
+  .auth-head .mail{ color:var(--muted); font-size:13px; }
+  .tabs{ display:flex; gap:6px; margin-bottom:16px; }
+  .tab{
+    flex:1; padding:7px; border:1px solid var(--line); background:#fff;
+    border-radius:8px; color:var(--muted); text-align:center;
+  }
+  .tab.on{ background:var(--accent-weak); color:var(--accent); font-weight:600; border-color:var(--accent); }
+
+  .mail-list{ border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .mail-row{
+    display:grid; grid-template-columns:auto 1fr 96px 84px;
+    gap:10px; align-items:center; padding:11px 14px; cursor:pointer;
+    border-bottom:1px solid var(--line); background:#fff;
+  }
+  .mail-row:last-child{ border-bottom:0; }
+  .mail-row:hover{ background:#f8fafc; }
+  .mail-row .from{ font-weight:600; min-width:120px; }
+  .mail-row .subject{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mail-row .meta{ text-align:right; color:var(--muted); font-size:12px; white-space:nowrap; }
+  .mail-empty{ padding:26px; text-align:center; color:var(--muted); }
+
+  .mail-view-head{ border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:14px; }
+  .mail-view-body{ white-space:pre-wrap; word-break:break-all; }
+  .kv{ font-size:13px; color:var(--muted); }
+
+  table.res{ width:100%; border-collapse:collapse; margin-top:8px; }
+  table.res th, table.res td{ border:1px solid var(--line); padding:7px 9px; text-align:left; }
+  table.res th{ background:#f8fafc; }
+  .mono{ font-family:ui-monospace,Consolas,monospace; }
+
+  @media (max-width:860px){
+    .app{ grid-template-columns:1fr; }
+    aside.side{ position:static; }
+  }
 </style>
 </head>
 <body>
-<h1>📧 MailForge Web 邮箱（接口演示页）</h1>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand"><span class="brand-logo">M</span><span>MailForge 邮箱</span></div>
+    <div class="account" id="accArea">
+      <span class="avatar" id="avatar">?</span>
+      <span class="who">
+        <span id="curUser">user</span>
+        <span class="mail" id="curMail">@example.com</span>
+      </span>
+      <button class="btn sm" onclick="doLogout()">退出登录</button>
+    </div>
+  </div>
+</header>
 
-<!-- 协议演示入口 -->
-<div class="card" style="text-align:center">
-  🧪 <b>协议实验室</b>：
-  <a href="/demo_smtp.html"><button>🔧 SMTP 协议演示</button></a>
-  <a href="/demo_pop3.html"><button>📥 POP3 协议演示</button></a>
-  <span style="color:#888">（直接看客户端命令与服务器应答的原始对话）</span>
+<div class="wrap">
+
+  <!-- ========== 登录 / 注册 ========== -->
+  <div class="authbox card" id="authCard">
+    <div class="auth-head">
+      <h2>欢迎使用 MailForge</h2>
+      <div class="mail">SMTP / POP3 课程邮件系统 · AES-256-CBC + ChaCha20 自研加密</div>
+    </div>
+    <div class="tabs">
+      <button class="tab on" id="tabLogin" onclick="switchAuth('login')">登录</button>
+      <button class="tab" id="tabReg" onclick="switchAuth('reg')">注册</button>
+    </div>
+
+    <div id="paneLogin">
+      <div class="field"><label>用户名</label><input id="inUser" placeholder="如 bob"></div>
+      <div class="field"><label>密码</label><input id="inPass" type="password" placeholder="如 123456" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <button class="btn primary" style="width:100%;justify-content:center" onclick="doLogin()">登 录</button>
+      <div class="msg" id="loginMsg"></div>
+    </div>
+
+    <div id="paneReg" style="display:none">
+      <div class="field"><label>用户名（字母数字）</label><input id="regUser" placeholder="如 carol"></div>
+      <div class="field"><label>密码（至少 4 位）</label><input id="regPass" type="password"></div>
+      <div class="field"><label>确认密码</label><input id="regPass2" type="password" onkeydown="if(event.key==='Enter')doRegister()"></div>
+      <button class="btn primary" style="width:100%;justify-content:center" onclick="doRegister()">注册并自动登录</button>
+      <div class="msg" id="regMsg"></div>
+    </div>
+  </div>
+
+  <!-- ========== 登录后的应用界面 ========== -->
+  <div class="app" id="appArea" style="display:none">
+
+    <aside class="side">
+      <div class="side-inner">
+        <button class="nav-btn on" data-sec="send"  onclick="goto('send')">✉ 写邮件</button>
+        <button class="nav-btn" data-sec="inbox" onclick="goto('inbox')">📥 收件箱<span id="inboxCount"></span></button>
+        <button class="nav-btn" data-sec="bench" onclick="goto('bench')">⚡ 性能压测</button>
+        <div class="side-hr"></div>
+        <a class="nav-btn" href="/demo_smtp.html" style="display:block">🧪 SMTP 协议演示</a>
+        <a class="nav-btn" href="/demo_pop3.html" style="display:block">🧪 POP3 协议演示</a>
+        <div class="side-note">邮件加密：AES-256-CBC / ChaCha20<br>传输与落盘均为密文</div>
+      </div>
+    </aside>
+
+    <main>
+      <!-- 写邮件 -->
+      <section class="view on card" id="sec-send">
+        <div class="rowbar"><h3>写邮件</h3></div>
+        <div class="field"><label>收件人</label><input id="inTo" placeholder="如 bob@example.com"></div>
+        <div class="field"><label>主题</label><input id="inSubject"></div>
+        <div class="field">
+          <label>正文</label>
+          <textarea id="inBody" placeholder="邮件正文…"></textarea>
+        </div>
+        <div class="field">
+          <label>发送时加密（算法在传输/落盘前对整封邮件加密）</label>
+          <select id="inAlgo">
+            <option value="none">不加密（明文）</option>
+            <option value="aes" selected>AES-256-CBC（自研）</option>
+            <option value="chacha">ChaCha20（自研）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>附件（≤1.4MB）</label>
+          <input type="file" id="inFile" onchange="onFilePick()">
+          <span id="fileInfo" class="muted"></span>
+        </div>
+        <div class="rowbar">
+          <button class="btn primary" onclick="doSend()">发送邮件</button>
+          <span class="msg" id="sendMsg"></span>
+        </div>
+      </section>
+
+      <!-- 收件箱 -->
+      <section class="view card" id="sec-inbox">
+        <div id="inboxListPane">
+          <div class="rowbar">
+            <h3>收件箱</h3>
+            <button class="btn sm" onclick="loadInbox()">↻ 刷新</button>
+          </div>
+          <div class="mail-list" id="mailRows"></div>
+          <div class="msg" id="inboxMsg"></div>
+        </div>
+
+        <div id="readPane" style="display:none">
+          <div class="rowbar">
+            <button class="btn sm" onclick="backToList()">← 返回列表</button>
+            <button class="btn sm danger" id="btnDelete" onclick="doDelete()">删除这封</button>
+          </div>
+          <div class="mail-view-head">
+            <h3 id="readSubject"></h3>
+            <div class="kv" id="readFrom"></div>
+            <div class="kv" id="readMeta"></div>
+            <div class="msg" id="readMsg"></div>
+          </div>
+          <div id="attArea" style="display:none; margin-bottom:12px"></div>
+          <div class="mail-view-body" id="mailContent"></div>
+        </div>
+      </section>
+
+      <!-- 性能压测 -->
+      <section class="view card" id="sec-bench">
+        <div class="rowbar"><h3>性能压测（含加密收发）</h3></div>
+        <div class="field">
+          <label>测试模式（每模式 100 封约 1MB 邮件，测完自动清理）</label>
+          <select id="benchMode">
+            <option value="plain">明文</option>
+            <option value="aes">AES-256-CBC 加密</option>
+            <option value="chacha">ChaCha20 加密</option>
+            <option value="all">三种全跑（明文 + AES + ChaCha）</option>
+          </select>
+        </div>
+        <p class="muted" style="margin:0 0 12px">加密模式会逐封 RETR 验证“密文可被正确解密还原”。每模式约 30~90 秒，三种全跑约 2~4 分钟，期间请勿关闭页面。</p>
+        <button class="btn primary" id="btnBench" onclick="runBench()">开始压测</button>
+        <div class="msg" id="benchMsg"></div>
+        <div id="benchResult"></div>
+      </section>
+    </main>
+  </div>
 </div>
-
-<!-- 登录 -->
-<div class="card" id="cardLogin">
-  <h3>登录（账号在 MailServer/users.txt）</h3>
-  <input id="inUser" placeholder="用户名，如 bob">　
-  <input id="inPass" type="password" placeholder="密码，如 123456">
-  <button onclick="doLogin()">登录</button>
-  <button onclick="doLogout()">退出</button>
-  <span id="loginMsg"></span>
-</div>
-
-<!-- 注册 -->
-<div class="card" id="cardReg">
-  <h3>🆕 还没有账号？注册一个</h3>
-  <input id="regUser" placeholder="用户名（字母数字，如 carol）">　
-  <input id="regPass" type="password" placeholder="密码（至少 4 位）">
-  <input id="regPass2" type="password" placeholder="再输一次密码">
-  <button onclick="doRegister()">注册并自动登录</button>
-  <span id="regMsg"></span>
-</div>
-
-<!-- 写信 -->
-<div class="card" id="cardSend" style="display:none">
-  <h3>✉️ 写邮件</h3>
-  收件人:<input id="inTo" placeholder="如 alice@example.com" style="width:60%"><br>
-  主题  :<input id="inSubject" style="width:60%"><br>
-  正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
-   <label>发送时加密：
-     <select id="inAlgo">
-       <option value="none">不加密</option>
-       <option value="aes" selected>🔐 AES-256-CBC（自研）</option>
-       <option value="chacha">🔐 ChaCha20（自研）</option>
-     </select></label><br>
-  附件:<input type="file" id="inFile" onchange="onFilePick()">
-  <span id="fileInfo"></span><br>
-  <button onclick="doSend()">发送</button>
-  <span id="sendMsg"></span>
-</div>
-
-<!-- 收件箱 -->
-<div class="card" id="cardInbox" style="display:none">
-  <h3>📥 收件箱 <button onclick="loadInbox()">刷新</button></h3>
-  <table>
-    <tr><th>编号</th><th>发件人</th><th>主题</th><th>大小</th><th>加密</th><th></th></tr>
-    <tbody id="mailRows"></tbody>
-  </table>
-  <span id="inboxMsg"></span>
-</div>
-
-<!-- 性能压测 -->
-<div class="card" id="cardBench" style="display:none">
-  <h3>⚡ 性能压测（每模式 100 封 1MB+ 邮件，含加密通道）</h3>
-  <p>模式：
-    <select id="benchMode">
-      <option value="plain">明文</option>
-      <option value="aes">🔐 AES-256-CBC 加密</option>
-      <option value="chacha">🔐 ChaCha20 加密</option>
-      <option value="all">三种全跑（明文 + AES + ChaCha）</option>
-    </select>
-  </p>
-  <p>连续向自己发送约 1MB 的邮件，统计发送成功率 / 丢包率 / 平均时延；
-     加密模式还会逐一 RETR 验证“密文可被正确解密还原”，测完自动清理。
-     每模式约 30~90 秒（选“三种全跑”约 2~4 分钟），期间请勿关闭页面。</p>
-  <button id="btnBench" onclick="runBench()">开始压测</button>
-  <span id="benchMsg"></span>
-  <div id="benchResult" style="display:none; margin-top:10px; line-height:1.9;"></div>
-</div>
-
-<!-- 阅读 -->
-<div class="card" id="cardRead" style="display:none">
-  <h3>📄 邮件内容 <button onclick="hideRead()">返回列表</button>
-      <button id="btnDelete" onclick="doDelete()">删除这封</button></h3>
-  <div id="attArea"></div>
-  <pre id="mailContent"></pre>
-</div>
-
 <script>
+/* ==================== 状态 ==================== */
 let TOKEN = localStorage.getItem("mf_token") || "";
-let CURRENT_N = 0;
+let CURRENT_USER = localStorage.getItem("mf_user") || "";
+let CURRENT_N = 0;                       // 正在阅读的邮件编号
+let ATT = { filename: "", b64: "" };     // 待发送附件
 
-function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+const $ = id => document.getElementById(id);
 
+function esc(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function setMsg(id, text, isErr){
+  const el = $(id);
+  el.textContent = text;
+  el.className = "msg " + (isErr ? "err" : "ok");
+  if (!text) el.className = "msg";
+}
 async function post(path, obj){
   const body = new URLSearchParams(obj);
   const r = await fetch(path, { method:"POST",
@@ -114,151 +289,160 @@ async function post(path, obj){
   return r.json();
 }
 
-function setMsg(id, text, isErr){
-  const el = document.getElementById(id);
-  el.textContent = text;
-  el.className = isErr ? "err" : "";
+/* ==================== 登录 / 注册 / 退出 ==================== */
+function switchAuth(which){
+  $("tabLogin").className = "tab" + (which === "login" ? " on" : "");
+  $("tabReg").className   = "tab" + (which === "reg"   ? " on" : "");
+  $("paneLogin").style.display = (which === "login") ? "" : "none";
+  $("paneReg").style.display   = (which === "reg")   ? "" : "none";
 }
 
 function showLoginState(){
-  document.getElementById("cardSend").style.display   = TOKEN ? "" : "none";
-  document.getElementById("cardInbox").style.display  = TOKEN ? "" : "none";
-  document.getElementById("cardBench").style.display = TOKEN ? "" : "none";
-  if (TOKEN) loadInbox();
-}
-
-async function doRegister(){
-  const u  = document.getElementById("regUser").value.trim();
-  const p1 = document.getElementById("regPass").value;
-  const p2 = document.getElementById("regPass2").value;
-  if (!u || !p1){ setMsg("regMsg", "请填写用户名和密码", true); return; }
-  if (p1 !== p2){ setMsg("regMsg", "两次输入的密码不一致", true); return; }
-  const j = await post("/api/register", { user: u, pass: p1 });
-  setMsg("regMsg", j.msg, !j.ok);
-  if (j.ok){
-    TOKEN = j.token;
-    localStorage.setItem("mf_token", TOKEN);
-    document.getElementById("regUser").value = "";
-    document.getElementById("regPass").value = "";
-    document.getElementById("regPass2").value = "";
-    showLoginState();
+  const logged = !!TOKEN;
+  $("authCard").style.display = logged ? "none" : "";
+  $("appArea").style.display  = logged ? "" : "none";
+  $("accArea").style.display  = logged ? "flex" : "none";
+  if (logged){
+    const u = CURRENT_USER || "user";
+    $("avatar").textContent = u.charAt(0).toUpperCase();
+    $("curUser").textContent = u;
+    $("curMail").textContent = u + "@example.com";
+    goto("inbox");
+    loadInbox();
   }
 }
 
 async function doLogin(){
-  const user = document.getElementById("inUser").value.trim();
-  const pass = document.getElementById("inPass").value;
+  const user = $("inUser").value.trim();
+  const pass = $("inPass").value;
+  if (!user || !pass){ setMsg("loginMsg", "请输入用户名和密码", true); return; }
   const j = await post("/api/login", { user, pass });
-  if (j.ok){ TOKEN = j.token; localStorage.setItem("mf_token", TOKEN); setMsg("loginMsg","登录成功"); showLoginState(); }
-  else setMsg("loginMsg", j.msg, true);
+  if (!j.ok){ setMsg("loginMsg", j.msg, true); return; }
+  TOKEN = j.token; CURRENT_USER = user;
+  localStorage.setItem("mf_token", TOKEN);
+  localStorage.setItem("mf_user", CURRENT_USER);
+  setMsg("loginMsg", "登录成功", false);
+  showLoginState();
+}
+
+async function doRegister(){
+  const u  = $("regUser").value.trim();
+  const p1 = $("regPass").value;
+  const p2 = $("regPass2").value;
+  if (!u || !p1){ setMsg("regMsg", "请填写用户名和密码", true); return; }
+  if (p1 !== p2){ setMsg("regMsg", "两次输入的密码不一致", true); return; }
+  const j = await post("/api/register", { user: u, pass: p1 });
+  if (!j.ok){ setMsg("regMsg", j.msg, true); return; }
+  TOKEN = j.token; CURRENT_USER = u;
+  localStorage.setItem("mf_token", TOKEN);
+  localStorage.setItem("mf_user", CURRENT_USER);
+  setMsg("regMsg", "注册成功，已自动登录", false);
+  showLoginState();
 }
 
 async function doLogout(){
   if (TOKEN) await post("/api/logout", { token: TOKEN });
-  TOKEN = ""; localStorage.removeItem("mf_token"); showLoginState(); setMsg("loginMsg","已退出");
+  TOKEN = ""; CURRENT_USER = "";
+  localStorage.removeItem("mf_token");
+  localStorage.removeItem("mf_user");
+  showLoginState();
+  setMsg("loginMsg", "已退出登录", false);
 }
 
-let ATT = { filename: "", b64: "" };   // 待发送的附件
-
+/* ==================== 视图切换 ==================== */
+function goto(sec){
+  ["send", "inbox", "bench"].forEach(s => {
+    $("sec-" + s).className = "view card" + (s === sec ? " on" : "");
+  });
+  document.querySelectorAll(".nav-btn[data-sec]").forEach(b => {
+    b.className = "nav-btn" + (b.getAttribute("data-sec") === sec ? " on" : "");
+  });
+  if (sec === "inbox"){ backToList(); loadInbox(); }
+  if (sec === "send"){ setMsg("sendMsg", "", false); }
+}
+/* ==================== 写邮件 + 附件 ==================== */
 function onFilePick(){
-  const f = document.getElementById("inFile").files[0];
-  const info = document.getElementById("fileInfo");
+  const f = $("inFile").files[0];
+  const info = $("fileInfo");
   if (!f){ ATT = { filename:"", b64:"" }; info.textContent=""; return; }
-  if (f.size > 1400*1024){           // 原始文件 ≤1.4MB（base64 后仍不超 2.1MB 限制）
+  if (f.size > 1400*1024){
     info.textContent = "文件太大（≤1.4MB）"; info.className = "err";
-    document.getElementById("inFile").value = ""; return;
+    $("inFile").value = ""; return;
   }
   const reader = new FileReader();
   reader.onload = () => {
     const ds = String(reader.result);
-    const b64 = ds.substring(ds.indexOf(",") + 1);
-    ATT = { filename: f.name, b64: b64 };
-    info.textContent = "已选: " + f.name + " (" + (f.size/1024).toFixed(0) + " KB)";
-    info.className = "";
+    ATT = { filename: f.name, b64: ds.substring(ds.indexOf(",") + 1) };
+    info.textContent = "已选: " + f.name + "（" + (f.size/1024).toFixed(0) + " KB）";
+    info.className = "muted";
   };
   reader.readAsDataURL(f);
 }
 
 async function doSend(){
-  const obj = { token: TOKEN, to: inTo.value.trim(), subject: inSubject.value, body: inBody.value };
-  const algo = document.getElementById("inAlgo").value;
+  const to = $("inTo").value.trim(), subject = $("inSubject").value, body = $("inBody").value;
+  if (!to || !subject){ setMsg("sendMsg", "请填写收件人和主题", true); return; }
+  const obj = { token: TOKEN, to: to, subject: subject, body: body };
+  const algo = $("inAlgo").value;
   if (algo !== "none"){ obj.encrypt = "1"; obj.algo = algo; }
   if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
+  setMsg("sendMsg", "发送中…", false);
   const j = await post("/api/send", obj);
-  setMsg("sendMsg", j.msg, !j.ok);
-  if (j.ok){
-    ATT = { filename:"", b64:"" };
-    document.getElementById("inFile").value = "";
-    document.getElementById("fileInfo").textContent = "";
-    setTimeout(loadInbox, 300);
-  }
+  if (!j.ok){ setMsg("sendMsg", j.msg, true); return; }
+  setMsg("sendMsg", j.msg, false);
+  $("inTo").value = ""; $("inSubject").value = ""; $("inBody").value = "";
+  ATT = { filename:"", b64:"" };
+  $("inFile").value = ""; $("fileInfo").textContent = "";
+  goto("inbox");
+}
+
+/* ==================== 收件箱列表 ==================== */
+function fmtSize(n){
+  if (n >= 1048576) return (n/1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n/1024).toFixed(0) + " KB";
+  return n + " B";
 }
 
 async function loadInbox(){
-  const r = await fetch("/api/inbox?token=" + encodeURIComponent(TOKEN));
-  const j = await r.json();
-  if (!j.ok){ setMsg("inboxMsg", j.msg, true); return; }
-  const tb = document.getElementById("mailRows");
-  tb.innerHTML = "";
-  for (const m of j.mails){
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + m.number + "</td><td>" + esc(m.from) + "</td><td>" + esc(m.subject)
-      + "</td><td>" + m.size + "</td><td>" + (m.encrypted ? "🔒 " : "") + (m.attachment ? "📎" : "-")
-      + "</td><td><button onclick='readMail(" + m.number + ")'>阅读</button></td>";
-    tb.appendChild(tr);
-  }
-  setMsg("inboxMsg", "共 " + j.mails.length + " 封");
-}
-
-async function runBench(){
-  const btn  = document.getElementById("btnBench");
-  const msg  = document.getElementById("benchMsg");
-  const box  = document.getElementById("benchResult");
-  const mode = document.getElementById("benchMode").value;
-  btn.disabled = true;
-  box.style.display = "none";
-  msg.textContent = "⏳ 压测进行中（" + mode + "，每模式 100 封 1MB+ 邮件）… 请稍候";
-  msg.className = "";
+  if (!TOKEN) return;
+  const tb = $("mailRows");
+  tb.innerHTML = "<div class='mail-empty'>正在加载…</div>";
   try{
-    const r = await fetch("/api/benchmark?token=" + encodeURIComponent(TOKEN)
-                          + "&encrypt=" + encodeURIComponent(mode));
+    const r = await fetch("/api/inbox?token=" + encodeURIComponent(TOKEN));
     const j = await r.json();
-    if (!j.ok){ msg.textContent = j.msg; msg.className = "err"; return; }
-    if (!j || !Array.isArray(j.modes)){
-      msg.textContent = "服务器返回的是旧版压测结果（缺少 modes）：当前 mail_server 进程是旧版本。请先停止旧进程并重新编译启动：make clean && make run（或 pkill mail_server 后 make run）";
-      msg.className = "err";
+    if (!j.ok){ setMsg("inboxMsg", j.msg, true); tb.innerHTML=""; return; }
+    setMsg("inboxMsg", "共 " + j.mails.length + " 封", false);
+    $("inboxCount").textContent = " (" + j.mails.length + ")";
+    if (!j.mails.length){
+      tb.innerHTML = "<div class='mail-empty'>收件箱是空的 —— 去写一封邮件吧</div>";
       return;
     }
-    msg.textContent = "";
-    const mb = (j.sizeBytes / 1048576).toFixed(2);
-    const sec = (j.totalMs / 1000).toFixed(1);
-    box.style.display = "";
-    const nameOf = { plain:"📄 明文", aes:"🔐 AES-256-CBC", chacha:"🔐 ChaCha20" };
-    let rows = "";
-    for (const m of j.modes){
-      const okStyle = m.lossRate > 0 ? "color:#c00" : "color:#080";
-      rows += "<tr><td>" + (nameOf[m.mode] || m.mode) + "</td>"
-            + "<td>" + m.smtpOk + " / " + m.count + "</td>"
-            + "<td>" + m.received + "</td>"
-            + "<td>" + (m.encrypted ? m.decryptOk : "-") + "</td>"
-            + "<td><b style='" + okStyle + "'>" + m.lossRate + "%</b></td>"
-            + "<td>" + m.avgLatencyMs.toFixed(1) + " ms</td>"
-            + "<td>" + (m.totalMs/1000).toFixed(1) + " s</td></tr>";
+    let html = "";
+    for (const m of j.mails){
+      const tags =
+        (m.encrypted ? "<span class='pill enc'>🔒 加密</span> " : "") +
+        (m.attachment ? "<span class='pill att'>📎</span>" : "");
+      const from = (m.from || "").split("@")[0];
+      html +=
+        "<div class='mail-row' onclick='readMail(" + m.number + ")'>" +
+          "<div style='min-width:56px'>" + tags + "</div>" +
+          "<div><div class='subject'>" + esc(m.subject) + "</div>" +
+            "<div class='muted' style='font-size:12px'>" + esc(m.from) + "</div></div>" +
+          "<div class='meta'>" + fmtSize(m.size) + "</div>" +
+          "<div class='meta'>#" + m.number + "</div>" +
+        "</div>";
     }
-    box.innerHTML = "📮 每模式发送 <b>" + j.modes[0].count + "</b> 封 × " + mb + " MB<br>"
-      + "<table style='margin-top:6px'><tr>"
-      + "<th>模式</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>"
-      + "<th>丢包率</th><th>平均时延</th><th>该轮耗时</th></tr>"
-      + rows + "</table>"
-      + "⏱ 总耗时 " + sec + " 秒<br>"
-      + "<span style='color:#888'>测试邮件已自动清理，收件箱已还原</span>";
+    tb.innerHTML = html;
   }catch(e){
-    msg.textContent = "压测请求失败: " + e;
-    msg.className = "err";
-  }finally{
-    btn.disabled = false;
-    loadInbox();
+    tb.innerHTML = "";
+    setMsg("inboxMsg", "加载失败: " + e, true);
   }
+}
+
+/* ==================== 阅读 / 删除 ==================== */
+function backToList(){
+  $("inboxListPane").style.display = "";
+  $("readPane").style.display = "none";
 }
 
 async function readMail(n){
@@ -266,42 +450,107 @@ async function readMail(n){
   const r = await fetch("/api/mail?token=" + encodeURIComponent(TOKEN) + "&n=" + n);
   const j = await r.json();
   if (!j.ok){ alert(j.msg); return; }
-  document.getElementById("mailContent").textContent =
-    (j.encrypted ? "🔒 这封邮件是加密存储的，已自动解密显示：\n\n" : "") + j.raw;
-  const area = document.getElementById("attArea");
+
+  $("inboxListPane").style.display = "none";
+  $("readPane").style.display = "";
+  $("readMsg").textContent = ""; $("readMsg").className = "msg";
+  let subj = j.raw.match(/^Subject:\s*(.*)$/mi)?.[1];
+  if (!subj) subj = j.encrypted ? "(加密邮件，主题不可见)" : "(无主题)";
+  $("readSubject").textContent = (j.encrypted ? "🔒 " : "") + subj;
+  $("readFrom").textContent = "发件人: " + (j.raw.match(/^From:\s*(.*)$/mi)?.[1] || "");
+  $("readMeta").textContent = j.encrypted ? "加密存储 · 已自动解密显示" : "";
+  $("mailContent").textContent = j.raw;
+
+  const area = $("attArea");
   if (j.attachments && j.attachments.length){
     area.style.display = "";
-    area.innerHTML = "📎 附件：";
+    let h = "📎 附件：";
     for (const a of j.attachments){
-      area.innerHTML += "<button onclick='downloadAttachment(" + CURRENT_N + "," + a.i
-        + ",\"" + (a.filename || "file").replace(/['"]/g,"") + "\")'>⬇ "
-        + esc(a.filename) + "</button> ";
+      const fn = (a.filename || "file").replace(/['"]/g, "");
+      h += "<button class='btn sm' style='margin:0 4px 4px 0' onclick='downloadAttachment(" +
+           CURRENT_N + "," + a.i + ",\"" + fn + "\")'>⬇ " + esc(a.filename) + "</button>";
     }
-  } else area.style.display = "none";
-  document.getElementById("cardRead").style.display = "";
+    area.innerHTML = h;
+  } else {
+    area.style.display = "none"; area.innerHTML = "";
+  }
 }
 
-async function downloadAttachment(n, i, name){
-  const r = await fetch("/api/attachment?token=" + encodeURIComponent(TOKEN)
-                        + "&n=" + n + "&i=" + i);
-  if (!r.ok){ alert("下载失败"); return; }
-  const blob = await r.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = name || ("attachment" + i);
-  document.body.appendChild(a); a.click(); a.remove();
+function downloadAttachment(n, i, name){
+  fetch("/api/attachment?token=" + encodeURIComponent(TOKEN) + "&n=" + n + "&i=" + i)
+    .then(r => { if (!r.ok) throw new Error("下载失败"); return r.blob(); })
+    .then(blob => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name || ("attachment" + i);
+      document.body.appendChild(a); a.click(); a.remove();
+    })
+    .catch(e => alert(String(e)));
 }
-
-function hideRead(){ document.getElementById("cardRead").style.display = "none"; }
 
 async function doDelete(){
-  if (!confirm("确定删除第 " + CURRENT_N + " 封？")) return;
+  if (!confirm("确定删除第 " + CURRENT_N + " 封邮件？")) return;
   const j = await post("/api/delete", { token: TOKEN, n: CURRENT_N });
-  alert(j.msg);
-  hideRead(); loadInbox();
+  if (!j.ok){ setMsg("readMsg", j.msg, true); return; }
+  backToList();
+  loadInbox();
+}
+/* ==================== 性能压测 ==================== */
+async function runBench(){
+  const btn  = $("btnBench");
+  const msg  = $("benchMsg");
+  const box  = $("benchResult");
+  const mode = $("benchMode").value;
+  const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
+  btn.disabled = true;
+  box.style.display = "none";
+  setMsg("benchMsg", "⏳ 压测进行中（" + (names[mode] || mode) +
+         "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
+  try{
+    const r = await fetch("/api/benchmark?token=" + encodeURIComponent(TOKEN)
+                          + "&encrypt=" + encodeURIComponent(mode));
+    const j = await r.json();
+    if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
+    if (!j || !Array.isArray(j.modes)){
+      setMsg("benchMsg",
+        "服务器返回旧版结果（缺少 modes）：请重新编译并重启服务器后再试：make clean && make run",
+        true);
+      return;
+    }
+    setMsg("benchMsg", "", false);
+    const mb = (j.sizeBytes / 1048576).toFixed(2);
+    const nameOf = { plain:"📄 明文", aes:"🔐 AES-256-CBC", chacha:"🔐 ChaCha20" };
+    let rows = "";
+    for (const m of j.modes){
+      const okStyle = m.lossRate > 0 ? "color:var(--err)" : "color:var(--ok)";
+      rows += "<tr><td>" + (nameOf[m.mode] || m.mode) + "</td>"
+            + "<td>" + m.smtpOk + " / " + m.count + "</td>"
+            + "<td>" + m.received + "</td>"
+            + "<td>" + (m.encrypted ? m.decryptOk : "—") + "</td>"
+            + "<td style='" + okStyle + "'><b>" + m.lossRate + "%</b></td>"
+            + "<td>" + m.avgLatencyMs.toFixed(1) + " ms</td>"
+            + "<td>" + (m.totalMs/1000).toFixed(1) + " s</td></tr>";
+    }
+    box.style.display = "";
+    box.innerHTML =
+      "<p class='muted'>每模式发送 <b>" + j.modes[0].count + "</b> 封 × " + mb +
+      " MB 邮件；测试邮件已自动清理，收件箱已还原。</p>" +
+      "<table class='res'><tr>" +
+      "<th>模式</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>" +
+      "<th>丢包率</th><th>平均时延</th><th>该轮耗时</th></tr>" +
+      rows + "</table>" +
+      "<p class='muted'>总耗时 " + (j.totalMs/1000).toFixed(1) + " 秒</p>";
+  }catch(e){
+    setMsg("benchMsg", "压测请求失败: " + e, true);
+  }finally{
+    btn.disabled = false;
+    loadInbox();
+  }
 }
 
-if (TOKEN) showLoginState();
+/* ==================== 初始化 ==================== */
+showLoginState();
 </script>
+
 </body>
 </html>
