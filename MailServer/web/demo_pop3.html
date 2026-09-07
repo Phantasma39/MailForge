@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>POP3 协议演示</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 12px;}
+  .card{border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:14px;}
+  input,button{font-size:14px;padding:6px 8px;margin:2px 2px;}
+  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:360px;overflow:auto;
+       font-family:monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;}
+  .c{color:#8ae17a;} .s{color:#ffd479;} .t{color:#888;}
+</style>
+</head>
+<body>
+<h2>📥 POP3 协议演示（端口 1110）</h2>
+<p class="t">每次操作都会用“当前登录账号”真实建立一次 POP3 会话：先 USER/PASS 登录，再执行命令。
+每次命令都会原样显示客户端（绿）与服务器（黄）的对话。</p>
+<div class="card">
+  <b>账号</b>（来自网页登录，每次会话自动执行 USER/PASS）<br><br>
+  操作：
+  <button onclick="cmd('')">仅登录</button>
+  <button onclick="cmd('STAT')">STAT</button>
+  <button onclick="cmd('LIST')">LIST</button>
+  <button onclick="cmd('RSET')">RSET</button>
+  <button onclick="cmd('NOOP')">NOOP</button><br>
+  编号:<input id="n" value="1" style="width:60px">
+  <button onclick="cmd('RETR ' + document.getElementById('n').value)">RETR n</button>
+  <button onclick="cmd('DELE ' + document.getElementById('n').value)">DELE n</button>
+  <a href="/"><button>← 返回首页</button></a>
+  <span id="msg"></span>
+</div>
+<div class="card"><div id="log"><span class="t">（先点一个操作按钮，对话会显示在这里）</span></div></div>
+
+<script>
+const TOKEN = localStorage.getItem("mf_token") || "";
+if (!TOKEN) document.getElementById("log").innerHTML = "<span class='s'>请先在首页登录（http://localhost:8080/），再回来用这个演示页。</span>";
+
+async function cmd(c){
+  if (!TOKEN){ alert("请先登录"); return; }
+  const log = document.getElementById("log");
+  const body = new URLSearchParams({ token: TOKEN, cmd: c });
+  log.innerHTML = "⏳ 连接 POP3(1110) 执行" + (c ? " " + esc(c) : "（仅登录）") + "…";
+  const r = await fetch("/api/demo/pop3", {method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
+  const j = await r.json();
+  if (!j.ok){ log.innerHTML = "<span class='s'>" + esc(j.msg) + "</span>"; return; }
+  let html = "<span class='t'>" + (j.loggedIn ? "登录成功（进入事务态）" : "⚠ 登录被拒绝") + "</span>\n";
+  for (const l of j.lines){
+    const who = l.who === "C" ? "[客户端→] " : "[服务器←] ";
+    const cls = l.who === "C" ? "c" : "s";
+    html += "<span class='" + cls + "'>" + who + esc(l.text) + "</span>\n";
+  }
+  log.innerHTML = html;
+  log.scrollTop = log.scrollHeight;
+}
+function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+</script>
+</body>
+</html>

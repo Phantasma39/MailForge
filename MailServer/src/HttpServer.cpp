@@ -17,6 +17,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 namespace {
 const char* kMailServerIp = "127.0.0.1";
@@ -721,6 +723,10 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleBenchmark(req, resp);
     } else if (req.method == "GET" && req.path == "/api/attachment") {
         handleAttachment(req, resp);
+    } else if (req.method == "POST" && req.path == "/api/demo/smtp") {
+        handleDemoSmtp(req, resp);
+    } else if (req.method == "POST" && req.path == "/api/demo/pop3") {
+        handleDemoPop3(req, resp);
     } else {
         resp.body = jsonResult(false, "未知接口: " + req.method + " " + req.path);
     }
@@ -1223,3 +1229,213 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
 }
 
+
+// ==================== 协议演示（SMTP/POP3 原始会话） ====================
+namespace {
+struct DemoLine { char who; std::string text; };   // who='C' 客户端 / 'S' 服务器
+
+bool demoReadLine(int fd, std::string& line) {
+    line.clear();
+    char c;
+    while (true) {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n <= 0) return false;
+        if (c == '\n') break;
+        if (line.size() < 16384) line += c;
+    }
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return true;
+}
+
+bool demoSendLine(int fd, const std::string& s) {
+    std::string msg = s + "\r\n";
+    size_t t = 0;
+    while (t < msg.size()) {
+        ssize_t n = send(fd, msg.data() + t, msg.size() - t, 0);
+        if (n < 0) return false;
+        t += (size_t)n;
+    }
+    return true;
+}
+
+// 建连到本机端口，设 5 秒收发超时
+int demoConnect(int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(port);
+    inet_pton(AF_INET, kMailServerIp, &a.sin_addr);
+    if (connect(fd, (struct sockaddr*)&a, sizeof(a)) < 0) { close(fd); return -1; }
+    struct timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    return fd;
+}
+
+// 执行一次 SMTP 会话（发一封邮件），把客户端命令和服务器应答完整记录下来
+bool runSmtpDemo(const std::string& from, const std::string& to,
+                 const std::string& subject, const std::string& body,
+                 std::vector<DemoLine>& out, std::string& err) {
+    int fd = demoConnect(kSmtpPort);
+    if (fd < 0) { err = "连接 SMTP(2525) 失败"; return false; }
+    std::string line;
+    if (!demoReadLine(fd, line)) { close(fd); err = "读取服务器问候超时"; return false; }
+    out.push_back({'S', line});
+
+    auto step = [&](const std::string& cmd) -> bool {
+        out.push_back({'C', cmd});
+        if (!demoSendLine(fd, cmd)) return false;
+        if (!demoReadLine(fd, line)) return false;
+        out.push_back({'S', line});
+        return true;
+    };
+
+    bool ok = step("EHLO MailForgeDemo");
+    ok = ok && step("MAIL FROM:<" + from + ">");
+    ok = ok && step("RCPT TO:<" + to + ">");
+    ok = ok && step("DATA");
+    if (ok) {
+        auto data = [&](const std::string& s) {
+            out.push_back({'C', s});
+            return demoSendLine(fd, s);
+        };
+        ok = data("From: " + from);
+        ok = ok && data("To: " + to);
+        ok = ok && data("Subject: " + subject);
+        ok = ok && data("");                       // 空行：头部与正文分隔
+        std::istringstream iss(body);
+        std::string bl;
+        while (ok && std::getline(iss, bl)) {
+            if (!bl.empty() && bl.back() == '\r') bl.pop_back();
+            if (bl.empty()) { ok = data(""); continue; }
+            if (bl[0] == '.') bl = "." + bl;       // SMTP 点填充
+            ok = data(bl);
+        }
+        ok = data(".") && ok;                      // 结束标记
+        if (demoReadLine(fd, line)) out.push_back({'S', line});
+    }
+    out.push_back({'C', "QUIT"});
+    demoSendLine(fd, "QUIT");
+    if (demoReadLine(fd, line)) out.push_back({'S', line});
+    close(fd);
+    return true;
+}
+
+// 执行一次 POP3 会话：登录(USER/PASS)后，可再执行一条命令（cmd 为空=只登录）
+bool runPop3Demo(const std::string& user, const std::string& pass,
+                 const std::string& cmd, std::vector<DemoLine>& out,
+                 bool& loggedIn, std::string& err) {
+    loggedIn = false;
+    int fd = demoConnect(kPop3Port);
+    if (fd < 0) { err = "连接 POP3(1110) 失败"; return false; }
+    std::string line;
+    if (!demoReadLine(fd, line)) { close(fd); err = "读取服务器问候超时"; return false; }
+    out.push_back({'S', line});
+
+    auto step = [&](const std::string& c) -> bool {
+        out.push_back({'C', c});
+        if (!demoSendLine(fd, c)) return false;
+        if (!demoReadLine(fd, line)) return false;
+        out.push_back({'S', line});
+        return true;
+    };
+
+    if (!step("USER " + user)) { close(fd); err="发送 USER 失败"; return false; }
+    if (!step("PASS " + pass)) { close(fd); err="发送 PASS 失败"; return false; }
+    loggedIn = (line.compare(0, 3, "+OK") == 0);
+
+    if (loggedIn && !cmd.empty()) {
+        std::string base = cmd;
+        size_t sp = cmd.find(' ');
+        if (sp != std::string::npos) base = cmd.substr(0, sp);
+        for (auto& c : base) c = (char)toupper((unsigned char)c);
+        bool allowed = (base == "STAT" || base == "NOOP" || base == "RSET" ||
+                        base == "LIST" || base == "RETR" || base == "DELE");
+        if (allowed) {
+            bool multi = (base == "RETR");
+            if (base == "LIST" && cmd.find(' ') == std::string::npos) multi = true;
+            if (step(cmd)) {
+                if (multi && line.compare(0, 3, "+OK") == 0) {
+                    while (demoReadLine(fd, line)) {
+                        out.push_back({'S', line});
+                        if (line == ".") break;    // 多行内容结束
+                    }
+                }
+            }
+        } else {
+            out.push_back({'C', cmd});
+            out.push_back({'S', "-ERR 演示页只支持 STAT/LIST/RETR/DELE/RSET/NOOP"});
+        }
+    }
+
+    step("QUIT");
+    close(fd);
+    return true;
+}
+} // namespace
+
+// ==================== POST /api/demo/smtp ====================
+// SMTP 协议演示：把"发一封邮件"的每一步命令与服务器应答原样返回给页面
+void HttpServer::handleDemoSmtp(const HttpRequest& req, HttpResponse& resp) {
+    resp.contentType = "application/json; charset=utf-8";
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    std::string from    = getParam(req, "from");
+    std::string to      = getParam(req, "to");
+    std::string subject = getParam(req, "subject");
+    std::string body    = getParam(req, "body");
+    if (from.empty()) from = session.user + "@example.com";
+    if (to.empty() || subject.empty()) {
+        resp.body = jsonResult(false, "缺少 to / subject 参数");
+        return;
+    }
+
+    std::vector<DemoLine> lines;
+    std::string err;
+    bool ok = runSmtpDemo(from, to, subject, body, lines, err);
+    if (!ok) { resp.body = jsonResult(false, err); return; }
+
+    std::string j = "{\"ok\":true,\"lines\":[";
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) j += ",";
+        j += "{\"who\":\"" + std::string(1, lines[i].who)
+           + "\",\"text\":\"" + jsonEscape(lines[i].text) + "\"}";
+    }
+    j += "]}";
+    resp.body = j;
+}
+
+// ==================== POST /api/demo/pop3 ====================
+// POP3 协议演示：cmd 为空=只登录；cmd 如 STAT/LIST/RETR 3/DELE 1/RSET/NOOP
+void HttpServer::handleDemoPop3(const HttpRequest& req, HttpResponse& resp) {
+    resp.contentType = "application/json; charset=utf-8";
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    std::string cmd = getParam(req, "cmd");
+
+    std::vector<DemoLine> lines;
+    bool loggedIn = false;
+    std::string err;
+    if (!runPop3Demo(session.user, session.pass, cmd, lines, loggedIn, err)) {
+        resp.body = jsonResult(false, err);
+        return;
+    }
+
+    std::string j = "{\"ok\":true,\"loggedIn\":" + std::string(loggedIn ? "true" : "false")
+                  + ",\"lines\":[";
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) j += ",";
+        j += "{\"who\":\"" + std::string(1, lines[i].who)
+           + "\",\"text\":\"" + jsonEscape(lines[i].text) + "\"}";
+    }
+    j += "]}";
+    resp.body = j;
+}

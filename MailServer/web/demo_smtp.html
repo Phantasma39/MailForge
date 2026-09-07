@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SMTP 协议演示</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 12px;}
+  .card{border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:14px;}
+  input,textarea,button{font-size:14px;padding:6px 8px;margin:2px 0;}
+  textarea{width:100%;height:80px;}
+  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:340px;overflow:auto;
+       font-family:monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;}
+  .c{color:#8ae17a;} .s{color:#ffd479;} .t{color:#888;}
+</style>
+</head>
+<body>
+<h2>🔧 SMTP 协议演示（端口 2525）</h2>
+<p class="t">这里“直接说协议”：点发送后，会真实建立一次 SMTP 会话，把客户端发出的每一行命令（绿）和服务器应答（黄）原样显示。邮件会真实投递到收件人。</p>
+<div class="card">
+  发件人:<input id="f" value="" placeholder="默认 = 当前登录账号"><br>
+  收件人:<input id="to" value="bob@example.com"><br>
+  主题  :<input id="sub" value="SMTP 协议演示邮件"><br>
+  正文  :<textarea id="body">这是通过浏览器演示页，逐条 SMTP 命令发出去的测试邮件。</textarea><br>
+  <button onclick="run()">发送并查看协议对话</button>
+  <a href="/"><button>← 返回首页</button></a>
+  <span id="msg"></span>
+</div>
+<div class="card"><div id="log"><span class="t">（点上面按钮开始，对话会显示在这里）</span></div></div>
+
+<script>
+const TOKEN = localStorage.getItem("mf_token") || "";
+if (!TOKEN) document.getElementById("log").innerHTML = "<span class='s'>请先在首页登录（http://localhost:8080/），再回来用这个演示页。</span>";
+
+async function run(){
+  if (!TOKEN){ alert("请先登录"); return; }
+  const log = document.getElementById("log");
+  const body = new URLSearchParams({
+    token: TOKEN, from: document.getElementById("f").value.trim(),
+    to: document.getElementById("to").value.trim(),
+    subject: document.getElementById("sub").value,
+    body: document.getElementById("body").value
+  });
+  log.innerHTML = "⏳ 连接 SMTP(2525) 并发送中…";
+  const r = await fetch("/api/demo/smtp", {method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
+  const j = await r.json();
+  if (!j.ok){ log.innerHTML = "<span class='s'>" + j.msg + "</span>"; return; }
+  let html = "";
+  for (const l of j.lines){
+    const who = l.who === "C" ? "[客户端→] " : "[服务器←] ";
+    const cls = l.who === "C" ? "c" : "s";
+    html += "<span class='" + cls + "'>" + who + esc(l.text) + "</span>\n";
+  }
+  log.innerHTML = html;
+  log.scrollTop = log.scrollHeight;
+}
+function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+</script>
+</body>
+</html>
