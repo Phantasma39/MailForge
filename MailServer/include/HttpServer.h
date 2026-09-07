@@ -94,8 +94,9 @@ private:
     void handleDelete(const HttpRequest& req, HttpResponse& resp);   // POST /api/delete
     void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
     void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
-    void handleDemoSmtp(const HttpRequest& req, HttpResponse& resp);  // POST /api/demo/smtp（SMTP 协议演示）
-    void handleDemoPop3(const HttpRequest& req, HttpResponse& resp);  // POST /api/demo/pop3（POP3 协议演示）
+    void handleRawOpen(const std::string& proto, const HttpRequest& req, HttpResponse& resp);
+    void handleRawSend(const std::string& proto, const HttpRequest& req, HttpResponse& resp);
+    void handleRawClose(const std::string& proto, const HttpRequest& req, HttpResponse& resp);
 
     // ---------- 业务辅助 ----------
     bool loginAndGetSession(const std::string& token,

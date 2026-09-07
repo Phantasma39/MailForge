@@ -19,6 +19,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <cerrno>
 
 namespace {
 const char* kMailServerIp = "127.0.0.1";
@@ -723,10 +724,18 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleBenchmark(req, resp);
     } else if (req.method == "GET" && req.path == "/api/attachment") {
         handleAttachment(req, resp);
-    } else if (req.method == "POST" && req.path == "/api/demo/smtp") {
-        handleDemoSmtp(req, resp);
-    } else if (req.method == "POST" && req.path == "/api/demo/pop3") {
-        handleDemoPop3(req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/smtp/open") {
+        handleRawOpen("smtp", req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/smtp/send") {
+        handleRawSend("smtp", req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/smtp/close") {
+        handleRawClose("smtp", req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/pop3/open") {
+        handleRawOpen("pop3", req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/pop3/send") {
+        handleRawSend("pop3", req, resp);
+    } else if (req.method == "POST" && req.path == "/api/raw/pop3/close") {
+        handleRawClose("pop3", req, resp);
     } else {
         resp.body = jsonResult(false, "未知接口: " + req.method + " " + req.path);
     }
@@ -1229,26 +1238,39 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
 }
 
-
-// ==================== 协议演示（SMTP/POP3 原始会话） ====================
+// ==================== 交互式协议终端（一问一答，保持连接） ====================
 namespace {
-struct DemoLine { char who; std::string text; };   // who='C' 客户端 / 'S' 服务器
+// 一条正在进行的协议会话：fd 是连着 2525/1110 的 socket
+struct RawConn { int fd = -1; long long lastMs = 0; };
+std::map<std::string, RawConn> gRawConns;
+std::mutex gRawMutex;
+const long long kConnTimeoutMs = 300000;   // 5 分钟没操作就自动断开
 
-bool demoReadLine(int fd, std::string& line) {
-    line.clear();
-    char c;
-    while (true) {
-        ssize_t n = recv(fd, &c, 1, 0);
-        if (n <= 0) return false;
-        if (c == '\n') break;
-        if (line.size() < 16384) line += c;
-    }
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    return true;
+long long rawNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool demoSendLine(int fd, const std::string& s) {
-    std::string msg = s + "\r\n";
+void rawSetTmo(int fd, int ms) {
+    struct timeval tv; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
+int rawConnect(int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(port);
+    inet_pton(AF_INET, kMailServerIp, &a.sin_addr);
+    if (connect(fd, (struct sockaddr*)&a, sizeof(a)) < 0) { close(fd); return -1; }
+    rawSetTmo(fd, 700);
+    return fd;
+}
+
+bool rawSendLine(int fd, const std::string& line) {
+    std::string msg = line + "\r\n";
     size_t t = 0;
     while (t < msg.size()) {
         ssize_t n = send(fd, msg.data() + t, msg.size() - t, 0);
@@ -1258,184 +1280,189 @@ bool demoSendLine(int fd, const std::string& s) {
     return true;
 }
 
-// 建连到本机端口，设 5 秒收发超时
-int demoConnect(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_port   = htons(port);
-    inet_pton(AF_INET, kMailServerIp, &a.sin_addr);
-    if (connect(fd, (struct sockaddr*)&a, sizeof(a)) < 0) { close(fd); return -1; }
-    struct timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    return fd;
-}
-
-// 执行一次 SMTP 会话（发一封邮件），把客户端命令和服务器应答完整记录下来
-bool runSmtpDemo(const std::string& from, const std::string& to,
-                 const std::string& subject, const std::string& body,
-                 std::vector<DemoLine>& out, std::string& err) {
-    int fd = demoConnect(kSmtpPort);
-    if (fd < 0) { err = "连接 SMTP(2525) 失败"; return false; }
-    std::string line;
-    if (!demoReadLine(fd, line)) { close(fd); err = "读取服务器问候超时"; return false; }
-    out.push_back({'S', line});
-
-    auto step = [&](const std::string& cmd) -> bool {
-        out.push_back({'C', cmd});
-        if (!demoSendLine(fd, cmd)) return false;
-        if (!demoReadLine(fd, line)) return false;
-        out.push_back({'S', line});
-        return true;
-    };
-
-    bool ok = step("EHLO MailForgeDemo");
-    ok = ok && step("MAIL FROM:<" + from + ">");
-    ok = ok && step("RCPT TO:<" + to + ">");
-    ok = ok && step("DATA");
-    if (ok) {
-        auto data = [&](const std::string& s) {
-            out.push_back({'C', s});
-            return demoSendLine(fd, s);
-        };
-        ok = data("From: " + from);
-        ok = ok && data("To: " + to);
-        ok = ok && data("Subject: " + subject);
-        ok = ok && data("");                       // 空行：头部与正文分隔
-        std::istringstream iss(body);
-        std::string bl;
-        while (ok && std::getline(iss, bl)) {
-            if (!bl.empty() && bl.back() == '\r') bl.pop_back();
-            if (bl.empty()) { ok = data(""); continue; }
-            if (bl[0] == '.') bl = "." + bl;       // SMTP 点填充
-            ok = data(bl);
+// 读一行；timeout=true 表示“没等到数据”（DATA 正文阶段服务器本来就不答话）
+bool rawReadLine(int fd, std::string& line, bool& timeout) {
+    line.clear(); timeout = false;
+    char c;
+    while (true) {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n == 0) return false;                     // 服务器关闭连接
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) { timeout = true; return false; }
+            return false;
         }
-        ok = data(".") && ok;                      // 结束标记
-        if (demoReadLine(fd, line)) out.push_back({'S', line});
+        if (c == '\n') break;
+        if (line.size() < 16000) line += c;
     }
-    out.push_back({'C', "QUIT"});
-    demoSendLine(fd, "QUIT");
-    if (demoReadLine(fd, line)) out.push_back({'S', line});
-    close(fd);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
     return true;
 }
 
-// 执行一次 POP3 会话：登录(USER/PASS)后，可再执行一条命令（cmd 为空=只登录）
-bool runPop3Demo(const std::string& user, const std::string& pass,
-                 const std::string& cmd, std::vector<DemoLine>& out,
-                 bool& loggedIn, std::string& err) {
-    loggedIn = false;
-    int fd = demoConnect(kPop3Port);
-    if (fd < 0) { err = "连接 POP3(1110) 失败"; return false; }
-    std::string line;
-    if (!demoReadLine(fd, line)) { close(fd); err = "读取服务器问候超时"; return false; }
-    out.push_back({'S', line});
-
-    auto step = [&](const std::string& c) -> bool {
-        out.push_back({'C', c});
-        if (!demoSendLine(fd, c)) return false;
-        if (!demoReadLine(fd, line)) return false;
-        out.push_back({'S', line});
-        return true;
-    };
-
-    if (!step("USER " + user)) { close(fd); err="发送 USER 失败"; return false; }
-    if (!step("PASS " + pass)) { close(fd); err="发送 PASS 失败"; return false; }
-    loggedIn = (line.compare(0, 3, "+OK") == 0);
-
-    if (loggedIn && !cmd.empty()) {
-        std::string base = cmd;
-        size_t sp = cmd.find(' ');
-        if (sp != std::string::npos) base = cmd.substr(0, sp);
-        for (auto& c : base) c = (char)toupper((unsigned char)c);
-        bool allowed = (base == "STAT" || base == "NOOP" || base == "RSET" ||
-                        base == "LIST" || base == "RETR" || base == "DELE");
-        if (allowed) {
-            bool multi = (base == "RETR");
-            if (base == "LIST" && cmd.find(' ') == std::string::npos) multi = true;
-            if (step(cmd)) {
-                if (multi && line.compare(0, 3, "+OK") == 0) {
-                    while (demoReadLine(fd, line)) {
-                        out.push_back({'S', line});
-                        if (line == ".") break;    // 多行内容结束
-                    }
-                }
-            }
-        } else {
-            out.push_back({'C', cmd});
-            out.push_back({'S', "-ERR 演示页只支持 STAT/LIST/RETR/DELE/RSET/NOOP"});
-        }
+// 找会话；超时则删除并报错
+int rawGetConn(const std::string& key, std::string& err) {
+    std::lock_guard<std::mutex> lock(gRawMutex);
+    auto it = gRawConns.find(key);
+    if (it == gRawConns.end()) { err = "会话不存在或已断开，请先点\"连接\""; return -1; }
+    if (rawNowMs() - it->second.lastMs > kConnTimeoutMs) {
+        close(it->second.fd);
+        gRawConns.erase(it);
+        err = "会话超时已自动断开，请重新连接";
+        return -1;
     }
+    it->second.lastMs = rawNowMs();
+    return it->second.fd;
+}
 
-    step("QUIT");
-    close(fd);
-    return true;
+void rawStoreConn(const std::string& key, int fd) {
+    std::lock_guard<std::mutex> lock(gRawMutex);
+    auto it = gRawConns.find(key);
+    if (it != gRawConns.end()) close(it->second.fd);   // 覆盖旧会话
+    RawConn c; c.fd = fd; c.lastMs = rawNowMs();
+    gRawConns[key] = c;
+}
+
+void rawDropConn(const std::string& key) {
+    std::lock_guard<std::mutex> lock(gRawMutex);
+    auto it = gRawConns.find(key);
+    if (it != gRawConns.end()) { close(it->second.fd); gRawConns.erase(it); }
 }
 } // namespace
 
-// ==================== POST /api/demo/smtp ====================
-// SMTP 协议演示：把"发一封邮件"的每一步命令与服务器应答原样返回给页面
-void HttpServer::handleDemoSmtp(const HttpRequest& req, HttpResponse& resp) {
+// ==================== POST /api/raw/<smtp|pop3>/open ====================
+// 建立一条到协议端口的真实长连接，返回连接 id 与服务器问候
+void HttpServer::handleRawOpen(const std::string& proto,
+                               const HttpRequest& req, HttpResponse& resp) {
     resp.contentType = "application/json; charset=utf-8";
     Session session;
     if (!loginAndGetSession(getParam(req, "token"), session)) {
         resp.body = jsonResult(false, "token 无效或已过期，请先登录");
         return;
     }
-    std::string from    = getParam(req, "from");
-    std::string to      = getParam(req, "to");
-    std::string subject = getParam(req, "subject");
-    std::string body    = getParam(req, "body");
-    if (from.empty()) from = session.user + "@example.com";
-    if (to.empty() || subject.empty()) {
-        resp.body = jsonResult(false, "缺少 to / subject 参数");
+    int port = (proto == "smtp") ? kSmtpPort : kPop3Port;
+    int fd = rawConnect(port);
+    if (fd < 0) { resp.body = jsonResult(false, "连接 " + proto + "(端口 "
+                         + std::to_string(port) + ") 失败"); return; }
+
+    // 读问候（等最长 3 秒）
+    rawSetTmo(fd, 3000);
+    std::string line; bool tmo;
+    std::string linesJson;
+    if (rawReadLine(fd, line, tmo)) {
+        linesJson = "{\"who\":\"S\",\"text\":\"" + jsonEscape(line) + "\"}";
+    } else if (!tmo) {
+        close(fd);
+        resp.body = jsonResult(false, "服务器没回问候就断开了");
         return;
     }
+    rawSetTmo(fd, 700);
 
-    std::vector<DemoLine> lines;
-    std::string err;
-    bool ok = runSmtpDemo(from, to, subject, body, lines, err);
-    if (!ok) { resp.body = jsonResult(false, err); return; }
+    std::string conn = proto + ":" + std::to_string(rawNowMs())
+                     + ":" + std::to_string(rand());
+    rawStoreConn(conn, fd);
 
-    std::string j = "{\"ok\":true,\"lines\":[";
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i) j += ",";
-        j += "{\"who\":\"" + std::string(1, lines[i].who)
-           + "\",\"text\":\"" + jsonEscape(lines[i].text) + "\"}";
-    }
-    j += "]}";
-    resp.body = j;
+    resp.body = std::string("{\"ok\":true,\"conn\":\"") + conn
+              + "\",\"lines\":[" + linesJson + "]}";
 }
 
-// ==================== POST /api/demo/pop3 ====================
-// POP3 协议演示：cmd 为空=只登录；cmd 如 STAT/LIST/RETR 3/DELE 1/RSET/NOOP
-void HttpServer::handleDemoPop3(const HttpRequest& req, HttpResponse& resp) {
+// ==================== POST /api/raw/<smtp|pop3>/send ====================
+// 把你输入的那一行原样发给服务器，并把服务器回的应答带回页面
+void HttpServer::handleRawSend(const std::string& proto,
+                               const HttpRequest& req, HttpResponse& resp) {
     resp.contentType = "application/json; charset=utf-8";
     Session session;
     if (!loginAndGetSession(getParam(req, "token"), session)) {
         resp.body = jsonResult(false, "token 无效或已过期，请先登录");
         return;
     }
-    std::string cmd = getParam(req, "cmd");
+    std::string conn = getParam(req, "conn");
+    std::string line = getParam(req, "line");
+    if (conn.empty() || line.size() > 16000) {
+        resp.body = jsonResult(false, "参数不对");
+        return;
+    }
+    // 行尾可能带 \r 或空格，统一去掉行尾 \r（命令以 \n 结尾即可）
+    while (!line.empty() && (line.back() == '\r')) line.pop_back();
 
-    std::vector<DemoLine> lines;
-    bool loggedIn = false;
     std::string err;
-    if (!runPop3Demo(session.user, session.pass, cmd, lines, loggedIn, err)) {
-        resp.body = jsonResult(false, err);
+    int fd = rawGetConn(conn, err);
+    if (fd < 0) { resp.body = jsonResult(false, err); return; }
+
+    if (!rawSendLine(fd, line)) {
+        rawDropConn(conn);
+        resp.body = jsonResult(false, "发送失败，连接可能已断开");
         return;
     }
 
-    std::string j = "{\"ok\":true,\"loggedIn\":" + std::string(loggedIn ? "true" : "false")
-                  + ",\"lines\":[";
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i) j += ",";
-        j += "{\"who\":\"" + std::string(1, lines[i].who)
-           + "\",\"text\":\"" + jsonEscape(lines[i].text) + "\"}";
+    // 读取应答：等 700ms；DATA 正文阶段服务器不答话 → 正常（waiting=true）
+    std::string reply;
+    bool tmo = false;
+    std::string jsonLines;
+    bool closed = false;
+
+    bool got = rawReadLine(fd, reply, tmo);
+    if (got) {
+        jsonLines += "{\"who\":\"S\",\"text\":\"" + jsonEscape(reply) + "\"}";
+    } else if (!tmo) {
+        closed = true;
+        rawDropConn(conn);
     }
-    j += "]}";
-    resp.body = j;
+
+    // 多行应答 / 收尾处理
+    if (got) {
+        // 该命令的基础名（转大写，用于判断多行应答）
+        std::string base = line;
+        size_t sp = line.find(' ');
+        if (sp != std::string::npos) base = line.substr(0, sp);
+        for (auto& c : base) c = (char)toupper((unsigned char)c);
+
+        bool multi = false;
+        if (proto == "pop3") {
+            multi = (base == "RETR" || base == "TOP");
+            if (base == "LIST" && line.find(' ') == std::string::npos) multi = true;
+        } else {   // smtp：'250-xxx' 形式的多行扩展应答
+            multi = (reply.size() >= 4 && reply[3] == '-');
+            if (base == "DATA" && reply.compare(0, 3, "354") == 0) multi = false;
+        }
+        if (multi) {
+            rawSetTmo(fd, 400);
+            while (true) {
+                std::string more; bool tm2 = false;
+                if (!rawReadLine(fd, more, tm2)) {
+                    if (!tm2) { closed = true; rawDropConn(conn); }
+                    break;
+                }
+                if (!jsonLines.empty()) jsonLines += ",";
+                jsonLines += "{\"who\":\"S\",\"text\":\"" + jsonEscape(more) + "\"}";
+                if (more == ".") break;          // POP3 多行内容结束
+                if (proto == "smtp" && more.size() >= 4 && more[3] != '-') break;
+                if (proto == "smtp" && more.size() < 4) break;
+            }
+            rawSetTmo(fd, 700);
+        }
+
+        // QUIT 之后服务器会关连接，主动读一次确认
+        if (base == "QUIT") {
+            rawSetTmo(fd, 400);
+            std::string last; bool tm3 = false;
+            if (!rawReadLine(fd, last, tm3) && !tm3) { closed = true; rawDropConn(conn); }
+        }
+    }
+
+    resp.body = std::string("{\"ok\":true,\"waiting\":") + (got ? "false" : "true")
+              + ",\"closed\":" + (closed ? "true" : "false")
+              + ",\"lines\":[" + jsonLines + "]}";
+}
+
+// ==================== POST /api/raw/<smtp|pop3>/close ====================
+void HttpServer::handleRawClose(const std::string& proto,
+                                const HttpRequest& req, HttpResponse& resp) {
+    (void)proto;   // 断开时协议已包含在 conn 里
+    resp.contentType = "application/json; charset=utf-8";
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期");
+        return;
+    }
+    rawDropConn(getParam(req, "conn"));
+    resp.body = jsonResult(true, "已断开");
 }

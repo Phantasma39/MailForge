@@ -2,58 +2,80 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>POP3 协议演示</title>
+<title>POP3 协议终端</title>
 <style>
-  body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 12px;}
+  body{font-family:system-ui,sans-serif;max-width:820px;margin:20px auto;padding:0 12px;}
   .card{border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:14px;}
-  input,button{font-size:14px;padding:6px 8px;margin:2px 2px;}
-  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:360px;overflow:auto;
-       font-family:monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;}
-  .c{color:#8ae17a;} .s{color:#ffd479;} .t{color:#888;}
+  input{font-size:14px;padding:6px 8px;width:70%;}
+  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:380px;overflow:auto;
+       font-family:monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-all;}
+  .c{color:#8ae17a;} .s{color:#ffd479;} .w{color:#5aa9ff;} .t{color:#888;}
 </style>
 </head>
 <body>
-<h2>📥 POP3 协议演示（端口 1110）</h2>
-<p class="t">每次操作都会用“当前登录账号”真实建立一次 POP3 会话：先 USER/PASS 登录，再执行命令。
-每次命令都会原样显示客户端（绿）与服务器（黄）的对话。</p>
+<h2>📥 POP3 协议终端（1110）—— 自己登录、自己敲命令</h2>
 <div class="card">
-  <b>账号</b>（来自网页登录，每次会话自动执行 USER/PASS）<br><br>
-  操作：
-  <button onclick="cmd('')">仅登录</button>
-  <button onclick="cmd('STAT')">STAT</button>
-  <button onclick="cmd('LIST')">LIST</button>
-  <button onclick="cmd('RSET')">RSET</button>
-  <button onclick="cmd('NOOP')">NOOP</button><br>
-  编号:<input id="n" value="1" style="width:60px">
-  <button onclick="cmd('RETR ' + document.getElementById('n').value)">RETR n</button>
-  <button onclick="cmd('DELE ' + document.getElementById('n').value)">DELE n</button>
+  <button onclick="conn()">1️⃣ 连接</button>
+  <button onclick="disconn()">断开</button>
   <a href="/"><button>← 返回首页</button></a>
-  <span id="msg"></span>
+  <span id="st"></span>
+  <p class="t">连接后 <b>自己输入</b>（一行一回车）：先 <code>USER bob</code> → <code>PASS 123456</code> 登录，然后随便敲<br>
+    <code>STAT</code> / <code>LIST</code> / <code>LIST 1</code> / <code>RETR 1</code> / <code>DELE 1</code> / <code>RSET</code> / <code>NOOP</code>，最后 <code>QUIT</code></p>
 </div>
-<div class="card"><div id="log"><span class="t">（先点一个操作按钮，对话会显示在这里）</span></div></div>
+<div class="card">
+  <input id="line" placeholder="在这里输入要发的命令…（Enter 发送）" autocomplete="off">
+  <button onclick="send()">发送</button>
+</div>
+<div class="card"><div id="log"><span class="t">（点“连接”，然后用 USER / PASS 自己登录）</span></div></div>
 
 <script>
 const TOKEN = localStorage.getItem("mf_token") || "";
-if (!TOKEN) document.getElementById("log").innerHTML = "<span class='s'>请先在首页登录（http://localhost:8080/），再回来用这个演示页。</span>";
+let CONN = "";
+const log = document.getElementById("log");
+if (!TOKEN) log.innerHTML = "<span class='s'>请先在首页登录后再来。</span>";
 
-async function cmd(c){
-  if (!TOKEN){ alert("请先登录"); return; }
-  const log = document.getElementById("log");
-  const body = new URLSearchParams({ token: TOKEN, cmd: c });
-  log.innerHTML = "⏳ 连接 POP3(1110) 执行" + (c ? " " + esc(c) : "（仅登录）") + "…";
-  const r = await fetch("/api/demo/pop3", {method:"POST",
-    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
-  const j = await r.json();
-  if (!j.ok){ log.innerHTML = "<span class='s'>" + esc(j.msg) + "</span>"; return; }
-  let html = "<span class='t'>" + (j.loggedIn ? "登录成功（进入事务态）" : "⚠ 登录被拒绝") + "</span>\n";
-  for (const l of j.lines){
-    const who = l.who === "C" ? "[客户端→] " : "[服务器←] ";
-    const cls = l.who === "C" ? "c" : "s";
-    html += "<span class='" + cls + "'>" + who + esc(l.text) + "</span>\n";
-  }
-  log.innerHTML = html;
+function out(who, txt){
+  const cls = who==="C" ? "c" : (who==="W" ? "w" : "s");
+  const tag = who==="C" ? "你→ " : (who==="W" ? "* " : "服务器← ");
+  log.innerHTML += "<span class='"+cls+"'>"+esc(tag)+esc(txt)+"</span>\n";
   log.scrollTop = log.scrollHeight;
 }
+
+async function api(path, obj){
+  const body = new URLSearchParams(obj);
+  const r = await fetch(path, {method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
+  return r.json();
+}
+
+async function conn(){
+  if (!TOKEN) return alert("请先登录");
+  const j = await api("/api/raw/pop3/open", { token: TOKEN });
+  if (!j.ok){ out("W", j.msg); return; }
+  CONN = j.conn;
+  document.getElementById("st").textContent = "已连接（conn=" + CONN.slice(0,24) + "…）";
+  for (const l of j.lines) out(l.who, l.text);
+}
+
+async function send(){
+  const box = document.getElementById("line");
+  const line = box.value;
+  box.value = "";
+  if (!CONN) return;   // 空行也能发（SMTP DATA 里要发空行分隔头部/正文）
+  out("C", line);
+  const j = await api("/api/raw/pop3/send", { token: TOKEN, conn: CONN, line: line });
+  if (!j.ok){ out("W", j.msg); CONN=""; return; }
+  if (j.waiting) out("W", "（服务器暂不应答）");
+  for (const l of j.lines) out(l.who, l.text);
+  if (j.closed){ out("W", "服务器已关闭连接"); CONN=""; document.getElementById("st").textContent="已断开"; }
+}
+
+async function disconn(){
+  if (CONN) await api("/api/raw/pop3/close", { token: TOKEN, conn: CONN });
+  CONN=""; document.getElementById("st").textContent="已断开";
+}
+
+document.addEventListener("keydown", e => { if (e.key === "Enter" && document.activeElement.id === "line") send(); });
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 </script>
 </body>

@@ -30,7 +30,7 @@
 | 用户注册 | `POST /api/register`：网页注册 → 写 users.txt + 建收件目录，**即时生效无需重启** | ✅ 已实现 |
 | 性能压测 | 网页一键连发 100 封 1MB+ 邮件，统计发送成功率/平均时延/**丢包率**，自动清理 | ✅ 已实现 |
 | 邮件附件 | MIME multipart：发信带附件（可与加密叠加）、收件箱📎标记、附件列表、在线下载 | ✅ 已实现 |
-| 协议演示页 | `/demo_smtp.html` `/demo_pop3.html`：网页上"直接说协议"，逐条显示命令与应答 | ✅ 已实现 |
+| 协议终端页 | `/demo_smtp.html` `/demo_pop3.html`：像 telnet 一样**自己敲命令一问一答**（需登录） | ✅ 已实现 |
 | 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
 
 ## 2. 端口约定
@@ -1043,8 +1043,9 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `GET /api/inbox` | `token`（URL 查询串） | `{"ok":true,"mails":[{number,size,subject,from,encrypted}]}` |
 | `GET /api/mail` | `token`,`n` | `{"ok":true,"number","encrypted","raw","attachments":[{i,filename,type}]}` |
 | `GET /api/attachment` | `token`,`n`,`i` | 附件二进制内容（`Content-Disposition: attachment` 下载头） |
-| `POST /api/demo/smtp` | `token`,`from`,`to`,`subject`,`body` | 执行一次真实 SMTP 会话并返回逐条对话（客户端/服务器） |
-| `POST /api/demo/pop3` | `token`,`cmd` | 用登录账号执行一次 POP3 会话（USER/PASS + cmd），返回对话 |
+| `POST /api/raw/{smtp,pop3}/open` | `token` | 建立一条到 2525/1110 的**长连接**，返回 conn 与服务器问候 |
+| `POST /api/raw/{smtp,pop3}/send` | `token`,`conn`,`line` | 把输入行原样发给服务器并返回应答（一问一答） |
+| `POST /api/raw/{smtp,pop3}/close` | `token`,`conn` | 主动断开这条连接 |
 | `GET /api/benchmark` | `token` | 压测结果：发送数/成功数/**丢包率**/平均时延/总耗时 |
 | `POST /api/delete` | `token`,`n` | `{"ok":true,"msg":...}` |
 | `GET /` | — | `web/index.html` 演示页 |

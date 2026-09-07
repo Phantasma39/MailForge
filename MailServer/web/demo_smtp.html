@@ -2,58 +2,81 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>SMTP 协议演示</title>
+<title>SMTP 协议终端</title>
 <style>
-  body{font-family:system-ui,sans-serif;max-width:760px;margin:20px auto;padding:0 12px;}
+  body{font-family:system-ui,sans-serif;max-width:820px;margin:20px auto;padding:0 12px;}
   .card{border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:14px;}
-  input,textarea,button{font-size:14px;padding:6px 8px;margin:2px 0;}
-  textarea{width:100%;height:80px;}
-  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:340px;overflow:auto;
-       font-family:monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;}
-  .c{color:#8ae17a;} .s{color:#ffd479;} .t{color:#888;}
+  input{font-size:14px;padding:6px 8px;width:70%;}
+  #log{background:#111;color:#eee;padding:12px;border-radius:6px;height:360px;overflow:auto;
+       font-family:monospace;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-all;}
+  .c{color:#8ae17a;} .s{color:#ffd479;} .w{color:#5aa9ff;} .t{color:#888;}
 </style>
 </head>
 <body>
-<h2>🔧 SMTP 协议演示（端口 2525）</h2>
-<p class="t">这里“直接说协议”：点发送后，会真实建立一次 SMTP 会话，把客户端发出的每一行命令（绿）和服务器应答（黄）原样显示。邮件会真实投递到收件人。</p>
+<h2>🔧 SMTP 协议终端（2525）—— 自己敲命令，一问一答</h2>
 <div class="card">
-  发件人:<input id="f" value="" placeholder="默认 = 当前登录账号"><br>
-  收件人:<input id="to" value="bob@example.com"><br>
-  主题  :<input id="sub" value="SMTP 协议演示邮件"><br>
-  正文  :<textarea id="body">这是通过浏览器演示页，逐条 SMTP 命令发出去的测试邮件。</textarea><br>
-  <button onclick="run()">发送并查看协议对话</button>
+  <button onclick="conn()">1️⃣ 连接</button>
+  <button onclick="disconn()">断开</button>
   <a href="/"><button>← 返回首页</button></a>
-  <span id="msg"></span>
+  <span id="st"></span>
+  <p class="t">连接后 <b>自己按顺序输入</b>（每行输入后按回车发送）：<br>
+    <code>EHLO myhost</code> → <code>MAIL FROM:&lt;alice@example.com&gt;</code> → <code>RCPT TO:&lt;bob@example.com&gt;</code> → <code>DATA</code><br>
+    → 再逐行输入邮件正文（第一行可写 <code>Subject: 你好</code>，空行后写正文）→ 最后单独输入 <code>.</code> 结束 → <code>QUIT</code></p>
 </div>
-<div class="card"><div id="log"><span class="t">（点上面按钮开始，对话会显示在这里）</span></div></div>
+<div class="card">
+  <input id="line" placeholder="在这里输入要发的命令…（Enter 发送）" autocomplete="off">
+  <button onclick="send()">发送</button>
+</div>
+<div class="card"><div id="log"><span class="t">（点“连接”，然后自己一条条敲命令）</span></div></div>
 
 <script>
 const TOKEN = localStorage.getItem("mf_token") || "";
-if (!TOKEN) document.getElementById("log").innerHTML = "<span class='s'>请先在首页登录（http://localhost:8080/），再回来用这个演示页。</span>";
+let CONN = "";
+const log = document.getElementById("log");
+if (!TOKEN) log.innerHTML = "<span class='s'>请先在首页登录后再来。</span>";
 
-async function run(){
-  if (!TOKEN){ alert("请先登录"); return; }
-  const log = document.getElementById("log");
-  const body = new URLSearchParams({
-    token: TOKEN, from: document.getElementById("f").value.trim(),
-    to: document.getElementById("to").value.trim(),
-    subject: document.getElementById("sub").value,
-    body: document.getElementById("body").value
-  });
-  log.innerHTML = "⏳ 连接 SMTP(2525) 并发送中…";
-  const r = await fetch("/api/demo/smtp", {method:"POST",
-    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
-  const j = await r.json();
-  if (!j.ok){ log.innerHTML = "<span class='s'>" + j.msg + "</span>"; return; }
-  let html = "";
-  for (const l of j.lines){
-    const who = l.who === "C" ? "[客户端→] " : "[服务器←] ";
-    const cls = l.who === "C" ? "c" : "s";
-    html += "<span class='" + cls + "'>" + who + esc(l.text) + "</span>\n";
-  }
-  log.innerHTML = html;
+function out(who, txt){
+  const cls = who==="C" ? "c" : (who==="W" ? "w" : "s");
+  const tag = who==="C" ? "你→ " : (who==="W" ? "* " : "服务器← ");
+  log.innerHTML += "<span class='"+cls+"'>"+esc(tag)+esc(txt)+"</span>\n";
   log.scrollTop = log.scrollHeight;
 }
+
+async function api(path, obj){
+  const body = new URLSearchParams(obj);
+  const r = await fetch(path, {method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()});
+  return r.json();
+}
+
+async function conn(){
+  if (!TOKEN) return alert("请先登录");
+  const j = await api("/api/raw/smtp/open", { token: TOKEN });
+  if (!j.ok){ out("W", j.msg); return; }
+  CONN = j.conn;
+  document.getElementById("st").textContent = "已连接（conn=" + CONN.slice(0,24) + "…）";
+  for (const l of j.lines) out(l.who, l.text);
+}
+
+async function send(){
+  const box = document.getElementById("line");
+  const line = box.value;
+  box.value = "";
+  if (!CONN) return;   // 空行也能发（SMTP DATA 里要发空行分隔头部/正文）
+  out("C", line);
+  const j = await api("/api/raw/smtp/send", { token: TOKEN, conn: CONN, line: line });
+  if (!j.ok){ out("W", j.msg); CONN=""; return; }
+  if (j.waiting) out("W", "（服务器暂不应答：DATA 正文阶段正常，输入 . 结束即可）");
+  for (const l of j.lines) out(l.who, l.text);
+  if (j.closed){ out("W", "服务器已关闭连接"); CONN=""; document.getElementById("st").textContent="已断开"; }
+}
+
+async function disconn(){
+  if (CONN) await api("/api/raw/smtp/close", { token: TOKEN, conn: CONN });
+  CONN=""; document.getElementById("st").textContent="已断开";
+}
+
+document.addEventListener("keydown", e => { if (e.key === "Enter" && document.activeElement.id === "line") send(); });
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 </script>
 </body>
