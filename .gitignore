@@ -21,6 +21,15 @@ mail_client_test
 smtp_server
 bridge
 
+# 加密子系统自测/工具产物（make test-crypto / demo-crypto 生成）
+crypto/tests/test_base64
+crypto/tests/test_logger
+crypto/tests/test_socket
+crypto/tests/test_crypto
+crypto/tests/demo_envelope
+crypto/tests/demo_visual
+crypto/tools/crypto_cli
+
 # ---- 运行时数据（启动服务器后自动生成） ----
 mailbox/
 keys/
