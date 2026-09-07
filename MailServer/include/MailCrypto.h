@@ -1,24 +1,19 @@
 // ============================================================================
 //  MailCrypto.h —— 邮件加密模块（MailForge 收发链路的加密统一入口）
 //
-//  设计目标：
-//    这是"端到端邮件加密"的统一入口。主通道是【数字信封】（AES-256-CBC +
-//    RSA-2048 混合加密 + SHA-256 签名，算法实现来自合并进来的 crypto-project
-//    子系统，见仓库 crypto/、common/ 的 mail:: 命名空间）。
-//    旧版 XOR 对称通道保留，用于兼容历史上用 XOR 发出的邮件。
+//  ★ 本模块的两条加密通道均为【纯自研对称加密】，不依赖 OpenSSL：
+//      1) ALGO_AES_CBC  —— AES-256-CBC（分组 + PKCS#7），见 crypto/aes.*
+//      2) ALGO_CHACHA20 —— ChaCha20（RFC 8439 流密码），见 crypto/chacha20.*
 //
-//  本模块内部协议：
-//    1) 不加密时：原文原样返回；
-//    2) XOR 加密时：输出 = "MailForge::ENC::XOR::" + Base64(异或后的密文)；
-//       解密时先认"签名头"，签名匹配就解，不匹配就按原文返回（兼容老邮件）。
-//    3) 数字信封加密时：输出是一段 ASCII 信封文本
-//       （-----BEGIN MAIL ENVELOPE----- ... -----END MAIL ENVELOPE-----），
-//       可直接放进 SMTP DATA 原样传输 / 落盘，收件方凭自己的私钥拆封。
+//  密钥管理：每个账号一把 32 字节随机对称密钥文件，保存在 keyDir（默认
+//  ./keys）下： keys/<用户名>.key
+//    发信时用【收件人】的密钥加密，收信时用【当前查看账号】的密钥解密；
+//    密钥文件不存在时自动生成（首次使用即自动补建，无需手工准备）。
 //
-//  使用示例（在 HTTP 层已接线，见 HttpServer.cpp 的 handleSend / decodeMail）：
-//    std::string envText;
-//    MailCrypto::encryptEnvelope(mailText, from, to, envText);   // 发送前
-//    MailCrypto::decryptEnvelope(envText, viewerUser, plain);    // 收取后
+//  密文线格式（正文区，可直接放 SMTP DATA / .eml）：
+//    AES  : "MailForge::ENC::AES::" + Base64(随机16字节IV ‖ 密文)
+//    ChaCha: "MailForge::ENC::CHA::" + Base64(随机12字节nonce ‖ 密文)
+//    解密端按魔数头部自动识别算法（见 detectAlgo / decodeMail）。
 // ============================================================================
 #ifndef MAIL_CRYPTO_H
 #define MAIL_CRYPTO_H
@@ -27,76 +22,55 @@
 
 namespace MailCrypto {
 
-// 支持的加密算法（扩展新算法时在这里加一个枚举值即可）
+// 支持的加密算法
 enum CryptoAlgo {
-    ALGO_NONE = 0,     // 不加密（默认，明文直传）
-    ALGO_XOR = 1,      // XOR 异或加密（演示/兼容历史邮件，已实现）
-    ALGO_RC4 = 2,      // RC4 流密码（预留，未实现）
-    ALGO_AES_CBC = 3,  // AES-256-CBC 对称加密（信封的组成算法之一，预留单独通道）
-    ALGO_ENVELOPE = 4  // ★ 数字信封：AES-256-CBC + RSA-2048（推荐通道，已接入收发流程）
+    ALGO_NONE = 0,       // 不加密（默认，明文直传）
+    ALGO_AES_CBC = 3,    // ★ AES-256-CBC 对称加密（自研）
+    ALGO_CHACHA20 = 5    // ★ ChaCha20 流密码（自研，RFC 8439）
 };
 
-// 加密后的"签名头"，用来识别一段文本是不是本模块加密过的
-extern const char* kEncMagicXor;   // "MailForge::ENC::XOR::"
+// 密文“魔数头”，用于识别一段文本是哪种算法加密过的
+extern const char* kEncMagicAes;    // "MailForge::ENC::AES::"
+extern const char* kEncMagicCha;    // "MailForge::ENC::CHA::"
 
 // ---- 对外主接口 ----
-// 对整封邮件文本加密。algo=ALGO_NONE 时原样返回（走明文通道）。
-// 输入：plainText 明文（可含中文，按字节处理）；key 对称密钥；
-//      algo 想用的算法。
-// 返回：加密结果字符串。
-// 【TODO】加新算法：在内部 switch 里补分支。
+// 加密整段邮件载荷。algo=ALGO_NONE 时原样返回。
+// key 为对称密钥（AES/ChaCha 需要 32 字节，通常来自 getUserKey）。
+// 返回：加密结果字符串（带魔数头 + Base64）。算法非法时按明文返回。
 std::string encryptPayload(const std::string& plainText,
                            const std::string& key,
                            CryptoAlgo algo = ALGO_NONE);
 
-// 对(可能)加密过的文本解密。
-// 输入：cipherText 收到的文本；key 对称密钥。
-// 返回：解密后的明文；如果没有签名头（说明本来就没加密）就原样返回。
-std::string decryptPayload(const std::string& cipherText,
-                           const std::string& key);
+// 解密(可能)加密过的文本。
+//   cipherText 无魔数头 → 按原文返回（out=原文，返回 true）；
+//   AES/CHA 头         → 用 key 解密；密钥错/密文被篡改/格式非法返回 false。
+bool decryptPayload(const std::string& cipherText,
+                    const std::string& key,
+                    std::string& plainOut);
 
-// ==================== 数字信封接口（推荐加密通道） ====================
-// 算法：AES-256-CBC（加密正文）+ RSA-2048（加密 AES 会话密钥）+ SHA-256 签名，
-//       实现位于 contrib/crypto-project 合并进来的 crypto/、common/（mail:: 命名空间）。
-// 密钥管理：每个用户一对 RSA-2048 密钥，保存在 keyDir（默认 ./keys）下：
-//   <keyDir>/<用户名>.key.pem  私钥
-//   <keyDir>/<用户名>.pub.pem  公钥
-// 用户名取邮箱 @ 之前部分并转小写（bob@example.com → bob），与 POP3 收件目录规范一致。
-// 首次使用（POP3 登录 / 发信）时若密钥不存在会自动生成，无需手工准备。
+// 识别一段文本由哪种算法加密（未加密返回 ALGO_NONE）
+CryptoAlgo detectAlgo(const std::string& text);
 
-// 确保某账号的 RSA 密钥对存在（不存在则自动生成）。userKey 传邮箱地址或用户名均可。
-bool ensureUserKeyPair(const std::string& userKey,
-                       const std::string& keyDir = "./keys");
+// 判断一段文本是不是本模块加密过的
+bool isEncryptedText(const std::string& text);
 
-// 数字信封加密（发送前调用）：
-//   用收件人(to)公钥加密随机会话密钥、AES-256-CBC 加密 plainText、
-//   发件人(from)私钥对密文签名；
-//   输出 ASCII 信封文本（可原样放进 SMTP DATA，也能被服务器当普通文本落盘）。
-bool encryptEnvelope(const std::string& plainText,
-                     const std::string& from,
-                     const std::string& to,
-                     std::string& envelopeText,
-                     const std::string& keyDir = "./keys");
+// ---- 对称密钥文件管理 ----
+// 确保某账号的 32 字节对称密钥存在（不存在则自动生成）并读出来。
+// userKey 传邮箱地址或用户名均可（bob@example.com → bob）。
+bool getUserKey(const std::string& userKey,
+                std::string& keyOut,
+                const std::string& keyDir = "./keys");
 
-// 数字信封解密（收取后调用）：
-//   viewerKey 是"当前查看邮件的收件人"（用其私钥拆封）；
-//   发送方公钥若在本地存在则自动验签（防篡改 + 身份认证）。
-bool decryptEnvelope(const std::string& envelopeText,
-                     const std::string& viewerKey,
-                     std::string& plainText,
-                     const std::string& keyDir = "./keys");
+// 只确保密钥文件存在（不返回内容），供登录时预生成使用。
+bool ensureUserKey(const std::string& userKey,
+                   const std::string& keyDir = "./keys");
 
-// 判断一段文本是否为 ASCII 数字信封（含 "-----BEGIN MAIL ENVELOPE-----" 标记）
-bool isEnvelopeText(const std::string& text);
-
-// ---- 基础算法（各自独立、可单独调用，方便单元测试） ----
-// Base64 编码 / 解码（3 字节 → 4 字符，RFC 4648）
+// ---- 基础工具 ----
+// Base64 编码 / 解码（RFC 4648；编码时每 76 字符换行以兼容 SMTP 行长限制）
 std::string base64Encode(const std::string& data);
 std::string base64Decode(const std::string& text);
-
-// XOR 逐字节异或（key 循环使用；返回与输入等长的字节串）
-std::string xorCipher(const std::string& data, const std::string& key);
 
 } // namespace MailCrypto
 
 #endif // MAIL_CRYPTO_H
+

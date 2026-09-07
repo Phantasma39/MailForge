@@ -356,10 +356,9 @@ bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) 
                 // 顺手建一下收件目录（即使还没有邮件，也让用户的邮箱目录先存在）
                 mkdir(mailboxDir(st.userKey).c_str(), 0755);
 
-                // 为账号初始化 RSA-2048 密钥对（加密收信用；keys/ 下不存在则自动生成）。
-                // 这样每个用户在第一次登录时就拥有自己的公/私钥，
-                // 别人给他发数字信封邮件时才能用他的公钥加密。
-                if (!MailCrypto::ensureUserKeyPair(st.userKey)) {
+                // 为账号初始化 32 字节对称密钥（keys/ 下不存在则自动生成）。
+                // 别人给他发加密邮件时用这把密钥，读取时也用这把密钥。
+                if (!MailCrypto::ensureUserKey(st.userKey)) {
                     std::cerr << "[POP3] 用户 " << st.userKey
                               << " 认证成功，但初始化加密密钥失败（不影响明文收发）"
                               << std::endl;

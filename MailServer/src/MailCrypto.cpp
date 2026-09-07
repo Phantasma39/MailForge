@@ -1,12 +1,11 @@
 // ============================================================================
 //  MailCrypto.cpp —— 邮件加密模块实现
 //
-//  内容分两大部分：
-//    1) 自带的轻量算法：Base64 + XOR（可插拔入口 encryptPayload / decryptPayload，
-//       保留用于兼容历史上用 XOR 通道发的旧邮件与附件编解码）；
-//    2) ★ 数字信封（AES-256-CBC + RSA-2048）：对接合并进来的 crypto-project 子系统
-//       （mail::DigitalEnvelope / mail::RsaKey，见仓库 crypto/、common/ 目录），
-//       为 MailForge 的 SMTP / POP3 / HTTP 收发链路提供非对称混合加密通道。
+//  结构：
+//    1) 基础工具：Base64（RFC 4648，76 字符换行）
+//    2) ★ 自研对称加密通道：AES-256-CBC 与 ChaCha20（RFC 8439），原语位于
+//       crypto/aes.* 与 crypto/chacha20.*（纯自研，无 OpenSSL）
+//    3) 按账号对称密钥管理：keys/<用户名>.key（32 字节，不存在则自动生成）
 // ============================================================================
 
 #include "MailCrypto.h"
@@ -14,21 +13,19 @@
 #include <sys/stat.h>
 #include <cctype>
 #include <mutex>
+#include <fstream>
 #include <iostream>
-#include <openssl/pem.h>
+#include <vector>
 
-#include "crypto/envelope.hpp"
-#include "crypto/rsa.hpp"
+#include "crypto/aes.hpp"
+#include "crypto/chacha20.hpp"
+#include "crypto/random.hpp"
 
 namespace {
 
-// ---- 数字信封用到的 RSA 密钥管理工具 ----
-// 密钥文件放 keyDir（默认 ./keys；已在 .gitignore 中忽略 keys/ 与 *.pem）
-
-std::mutex gKeyMutex;   // 密钥生成是"先查文件再写"，用锁避免多线程并发写坏
+std::mutex gKeyMutex;   // 密钥“先查文件再写”，用锁避免多线程并发写坏
 
 // 邮箱地址 → 本地用户名：bob@example.com / Bob / bob → bob
-// （只保留字母数字与 _-.，防止路径字符把密钥写到别处）
 std::string normUser(const std::string& email) {
     std::string u = email;
     std::size_t at = u.find('@');
@@ -47,27 +44,29 @@ bool fileExists(const std::string& path) {
     return stat(path.c_str(), &st) == 0;
 }
 
-std::string privKeyPath(const std::string& userKey, const std::string& dir) {
-    return dir + "/" + userKey + ".key.pem";
-}
-std::string pubKeyPath(const std::string& userKey, const std::string& dir) {
-    return dir + "/" + userKey + ".pub.pem";
+std::string userKeyPath(const std::string& user, const std::string& dir) {
+    return dir + "/" + user + ".key";
 }
 
-// PEM 私钥文件通常同时含公钥，这里把它导出成独立的公钥文件
-bool exportPublicFromPrivate(EVP_PKEY* priv, const std::string& pubPath) {
-    FILE* f = fopen(pubPath.c_str(), "wb");
-    if (!f) return false;
-    const bool ok = (PEM_write_PUBKEY(f, priv) == 1);
-    fclose(f);
-    return ok;
+bool readRawFile(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    out.assign((std::istreambuf_iterator<char>(in)),
+               std::istreambuf_iterator<char>());
+    return true;
 }
 
-// 幂等：确保 userKey 的 RSA-2048 密钥对存在，并加载出来
-bool loadOrCreateKeyPair(const std::string& userKey,
-                         const std::string& keyDir,
-                         mail::RsaKey& privOut,
-                         mail::RsaKey& pubOut) {
+bool writeRawFile(const std::string& path, const std::string& data) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(data.data(), (std::streamsize)data.size());
+    out.close();
+    return true;
+}
+
+// 幂等：确保 user 的对称密钥存在并读出来（32 字节）
+bool loadOrCreateUserKey(const std::string& user, const std::string& keyDir,
+                         std::string& keyOut) {
     std::lock_guard<std::mutex> lock(gKeyMutex);
 
     if (!keyDir.empty()) {
@@ -77,32 +76,30 @@ bool loadOrCreateKeyPair(const std::string& userKey,
         }
     }
 
-    const std::string privP = privKeyPath(userKey, keyDir);
-    const std::string pubP  = pubKeyPath(userKey, keyDir);
-    const bool hasPriv = fileExists(privP);
-    const bool hasPub  = fileExists(pubP);
-
-    if (!hasPriv && !hasPub) {
-        // 都没有：全新生成一对
-        mail::RsaKey kp;
-        if (!mail::RsaKey::Generate(kp)) return false;
-        if (!kp.SavePrivateKey(privP)) return false;
-        if (!kp.SavePublicKey(pubP)) return false;
-    } else if (hasPriv && !hasPub) {
-        // 私钥在、公钥丢了：从私钥补导出公钥，避免密钥对变化导致旧邮件拆不开
-        mail::RsaKey kp;
-        if (!mail::RsaKey::LoadPrivateKey(privP, kp)) return false;
-        if (!exportPublicFromPrivate(kp.get(), pubP)) return false;
-    } else if (!hasPriv && hasPub) {
-        // 只有公钥：上次生成没写完，重新生成整对
-        mail::RsaKey kp;
-        if (!mail::RsaKey::Generate(kp)) return false;
-        if (!kp.SavePrivateKey(privP)) return false;
-        if (!kp.SavePublicKey(pubP)) return false;
+    const std::string path = userKeyPath(user, keyDir);
+    if (fileExists(path)) {
+        if (!readRawFile(path, keyOut)) return false;
+        if (keyOut.size() != 32) {
+            std::cerr << "[MailCrypto] 密钥文件长度非法: " << path
+                      << "（期望 32 字节，实际 " << keyOut.size() << "）"
+                      << std::endl;
+            return false;
+        }
+        return true;
     }
 
-    if (!mail::RsaKey::LoadPrivateKey(privP, privOut)) return false;
-    if (!mail::RsaKey::LoadPublicKey(pubP, pubOut)) return false;
+    // 不存在：生成 32 字节随机密钥并落盘
+    std::string key(32, '\0');
+    if (!mail::RandomBytes(reinterpret_cast<unsigned char*>(&key[0]),
+                           key.size())) {
+        std::cerr << "[MailCrypto] 随机源不可用，无法生成密钥" << std::endl;
+        return false;
+    }
+    if (!writeRawFile(path, key)) {
+        std::cerr << "[MailCrypto] 无法写入密钥文件: " << path << std::endl;
+        return false;
+    }
+    keyOut.swap(key);
     return true;
 }
 
@@ -110,33 +107,44 @@ bool loadOrCreateKeyPair(const std::string& userKey,
 
 namespace MailCrypto {
 
-const char* kEncMagicXor = "MailForge::ENC::XOR::";
+const char* kEncMagicAes = "MailForge::ENC::AES::";
+const char* kEncMagicCha = "MailForge::ENC::CHA::";
 
-// ==================== Base64（RFC 4648） ====================
+static bool startsWith(const std::string& text, const std::string& prefix) {
+    return text.size() >= prefix.size() &&
+           text.compare(0, prefix.size(), prefix) == 0;
+}
+
+CryptoAlgo detectAlgo(const std::string& text) {
+    if (startsWith(text, kEncMagicAes)) return ALGO_AES_CBC;
+    if (startsWith(text, kEncMagicCha)) return ALGO_CHACHA20;
+    return ALGO_NONE;
+}
+
+bool isEncryptedText(const std::string& text) {
+    return detectAlgo(text) != ALGO_NONE;
+}
+
+// ==================== Base64（RFC 4648，76 字符换行） ====================
 
 std::string base64Encode(const std::string& data) {
     static const char tbl[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
     out.reserve((data.size() + 2) / 3 * 4 + 16);
-
-    size_t col = 0;   // 当前行字符计数：每 76 个字符插一个 \r\n
+    size_t col = 0;
     for (size_t i = 0; i < data.size(); i += 3) {
         unsigned a = (unsigned char)data[i];
         unsigned b = (i + 1 < data.size()) ? (unsigned char)data[i + 1] : 0;
         unsigned c = (i + 2 < data.size()) ? (unsigned char)data[i + 2] : 0;
         unsigned n = (a << 16) | (b << 8) | c;
-
         out += tbl[(n >> 18) & 63];
         out += tbl[(n >> 12) & 63];
         out += (i + 1 < data.size()) ? tbl[(n >> 6) & 63] : '=';
         out += (i + 2 < data.size()) ? tbl[n & 63] : '=';
         col += 4;
-        // SMTP 规定单行不能超过 1000 字节，Base64 每 76 字符换行（解码时会忽略换行）
-        if (col >= 76) {
-            out += "\r\n";
-            col = 0;
-        }
+        // SMTP 单行 ≤1000 字节：Base64 每 76 字符换行（解码忽略换行）
+        if (col >= 76) { out += "\r\n"; col = 0; }
     }
     return out;
 }
@@ -150,186 +158,130 @@ std::string base64Decode(const std::string& text) {
         if (c == '/') return 63;
         return -1;   // '=' 或非法字符
     };
-
     std::string out;
     int buf = 0, bits = 0;
     for (char c : text) {
-        // 编码时为了不超 SMTP 单行长度，每 76 字符插了一个换行；解码时直接跳过
-        if (c == '\r' || c == '\n' || c == ' ') continue;
-        if (c == '=') break;          // 填充符：Base64 数据到此结束
+        if (c == '\r' || c == '\n' || c == ' ') continue;   // 忽略换行
+        if (c == '=') break;                                // 填充结束
         int v = val(c);
         if (v < 0) continue;
         buf = (buf << 6) | v;
         bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out += (char)((buf >> bits) & 0xFF);
-        }
+        if (bits >= 8) { bits -= 8; out += (char)((buf >> bits) & 0xFF); }
     }
     return out;
 }
 
-// ==================== XOR 异或 ====================
-
-std::string xorCipher(const std::string& data, const std::string& key) {
-    std::string out = data;
-    if (key.empty()) return out;   // 没有密钥 = 不处理（安全起见）
-    for (size_t i = 0; i < out.size(); ++i) {
-        out[i] = (char)((unsigned char)out[i] ^ (unsigned char)key[i % key.size()]);
-    }
-    return out;
-}
-
-// ==================== 主入口 ====================
+// ==================== 加解密主入口 ====================
 
 std::string encryptPayload(const std::string& plainText,
                            const std::string& key,
                            CryptoAlgo algo) {
     switch (algo) {
         case ALGO_NONE:
-            return plainText;                       // 明文直传
+            return plainText;   // 明文直传
 
-        case ALGO_XOR:
-            // 格式：签名头 + Base64(XOR(明文, key))
-            return std::string(kEncMagicXor) + base64Encode(xorCipher(plainText, key));
+        case ALGO_AES_CBC: {
+            if (key.size() != 32) return "";   // 密钥长度不对 = 加密失败信号
+            std::vector<unsigned char> kvec(key.begin(), key.end());
+            std::vector<unsigned char> pt(plainText.begin(), plainText.end());
+            std::vector<unsigned char> iv = mail::Aes::GenerateIv();
+            std::vector<unsigned char> ct;
+            if (!mail::Aes::Encrypt(kvec, iv, pt, ct)) return "";
+            // 线格式：IV(16字节) ‖ 密文 → Base64
+            std::string raw;
+            raw.append((const char*)iv.data(), iv.size());
+            raw.append((const char*)ct.data(), ct.size());
+            return std::string(kEncMagicAes) + base64Encode(raw);
+        }
 
-        // 说明：ALGO_RC4 / ALGO_AES_CBC 为预留枚举位；当前主加密通道是
-        // ALGO_ENVELOPE（数字信封 AES-256-CBC + RSA-2048），见本文件下方
-        // encryptEnvelope / decryptEnvelope（已接入 HTTP 收发链路）。
+        case ALGO_CHACHA20: {
+            if (key.size() != 32) return "";
+            std::vector<unsigned char> kvec(key.begin(), key.end());
+            std::vector<unsigned char> pt(plainText.begin(), plainText.end());
+            std::vector<unsigned char> nonce(12, 0);
+            if (!mail::RandomBytes(nonce.data(), nonce.size())) return "";
+            std::vector<unsigned char> ct;
+            if (!mail::ChaCha20::Crypt(kvec, nonce, pt, ct)) return "";
+            // 线格式：nonce(12字节) ‖ 密文 → Base64
+            std::string raw;
+            raw.append((const char*)nonce.data(), nonce.size());
+            raw.append((const char*)ct.data(), ct.size());
+            return std::string(kEncMagicCha) + base64Encode(raw);
+        }
 
         default:
             return plainText;   // 未知算法兜底：当明文处理
     }
 }
 
-std::string decryptPayload(const std::string& cipherText,
-                           const std::string& key) {
-    const std::string magic(kEncMagicXor);
-
-    // 没有签名头 = 本来就没加密，原样返回
-    if (cipherText.compare(0, magic.size(), magic) != 0) {
-        return cipherText;
+// 解密结果应是一封可展示的邮件载荷（以 "Subject:" 开头）。密钥错误时解出
+// 乱码会在这里被拦下——尤其 ChaCha20 这类无填充校验的流密码需要此兜底。
+static bool looksLikeMailPayload(const std::string& s) {
+    if (s.size() < 10) return false;
+    for (int i = 0; i < 8; ++i) {
+        if (tolower((unsigned char)s[i]) != "subject:"[i]) return false;
     }
-
-    // 有 XOR 签名头：去掉头 → Base64 解码 → XOR 还原
-    std::string b64 = cipherText.substr(magic.size());
-    return xorCipher(base64Decode(b64), key);
-
-    // 说明：当前新的加密邮件走下方 decryptEnvelope（数字信封），不会出现在此分支。
+    return true;
 }
 
-// ============================================================================
-//  数字信封（AES-256-CBC + RSA-2048）—— 与 crypto-project 子系统对接的主通道
-// ============================================================================
+bool decryptPayload(const std::string& cipherText,
+                    const std::string& key,
+                    std::string& plainOut) {
+    const CryptoAlgo algo = detectAlgo(cipherText);
+    if (algo == ALGO_NONE) {
+        plainOut = cipherText;   // 本来就没加密
+        return true;
+    }
 
-bool ensureUserKeyPair(const std::string& userKey, const std::string& keyDir) {
+    if (key.size() != 32) return false;
+    const std::vector<unsigned char> kvec(key.begin(), key.end());
+
+    if (algo == ALGO_AES_CBC) {
+        const std::string b64 =
+            cipherText.substr(std::string(kEncMagicAes).size());
+        const std::string raw = base64Decode(b64);
+        if (raw.size() < 16 + 16) return false;   // IV + 至少一个密文块
+        std::vector<unsigned char> iv(raw.begin(), raw.begin() + 16);
+        std::vector<unsigned char> ct(raw.begin() + 16, raw.end());
+        std::vector<unsigned char> pt;
+        if (!mail::Aes::Decrypt(kvec, iv, ct, pt)) return false;
+        std::string out(pt.begin(), pt.end());
+        if (!looksLikeMailPayload(out)) return false;
+        plainOut.swap(out);
+        return true;
+    }
+
+    if (algo == ALGO_CHACHA20) {
+        const std::string b64 =
+            cipherText.substr(std::string(kEncMagicCha).size());
+        const std::string raw = base64Decode(b64);
+        if (raw.size() < 12) return false;   // nonce
+        std::vector<unsigned char> nonce(raw.begin(), raw.begin() + 12);
+        std::vector<unsigned char> ct(raw.begin() + 12, raw.end());
+        std::vector<unsigned char> pt;
+        if (!mail::ChaCha20::Crypt(kvec, nonce, ct, pt)) return false;
+        std::string out(pt.begin(), pt.end());
+        if (!looksLikeMailPayload(out)) return false;   // 流密码靠载荷头兜底
+        plainOut.swap(out);
+        return true;
+    }
+
+    return false;
+}
+
+// ==================== 按账号对称密钥管理 ====================
+
+bool getUserKey(const std::string& userKey, std::string& keyOut,
+                const std::string& keyDir) {
     const std::string u = normUser(userKey);
-    if (u.empty()) {
-        std::cerr << "[MailCrypto] 用户名为空，无法初始化密钥: \""
-                  << userKey << "\"" << std::endl;
-        return false;
-    }
-    mail::RsaKey priv, pub;
-    return loadOrCreateKeyPair(u, keyDir, priv, pub);
+    if (u.empty()) return false;
+    return loadOrCreateUserKey(u, keyDir, keyOut);
 }
 
-bool encryptEnvelope(const std::string& plainText,
-                     const std::string& from,
-                     const std::string& to,
-                     std::string& envelopeText,
-                     const std::string& keyDir) {
-    envelopeText.clear();
-
-    const std::string fromUser = normUser(from);
-    const std::string toUser   = normUser(to);
-    if (fromUser.empty() || toUser.empty()) {
-        std::cerr << "[MailCrypto] 信封加密失败：发件人/收件人地址不合法 (from="
-                  << from << ", to=" << to << ")" << std::endl;
-        return false;
-    }
-
-    // 发件人密钥对（签名）与收件人密钥对（加密会话密钥），缺则自动生成
-    mail::RsaKey senderPriv, senderPub, recipPriv, recipPub;
-    if (!loadOrCreateKeyPair(fromUser, keyDir, senderPriv, senderPub)) {
-        std::cerr << "[MailCrypto] 信封加密失败：无法获取发件人 "
-                  << fromUser << " 的密钥" << std::endl;
-        return false;
-    }
-    if (!loadOrCreateKeyPair(toUser, keyDir, recipPriv, recipPub)) {
-        std::cerr << "[MailCrypto] 信封加密失败：无法获取收件人 "
-                  << toUser << " 的密钥" << std::endl;
-        return false;
-    }
-
-    // 用收件人公钥 Seal：AES 加密正文 + RSA 加密会话密钥 + 发件人私钥签名
-    const std::vector<unsigned char> pt(plainText.begin(), plainText.end());
-    mail::Envelope env;
-    if (!mail::DigitalEnvelope::Seal(pt, from, to,
-                                     senderPriv.get(), recipPub.get(), env)) {
-        std::cerr << "[MailCrypto] 信封加密失败：数字信封 Seal 出错" << std::endl;
-        return false;
-    }
-
-    // 序列化成 ASCII 信封文本（可原样放进 SMTP DATA 传输）
-    if (!mail::DigitalEnvelope::Serialize(env, envelopeText)) {
-        std::cerr << "[MailCrypto] 信封加密失败：信封序列化出错" << std::endl;
-        envelopeText.clear();
-        return false;
-    }
-    return true;
-}
-
-bool decryptEnvelope(const std::string& envelopeText,
-                     const std::string& viewerKey,
-                     std::string& plainText,
-                     const std::string& keyDir) {
-    plainText.clear();
-    if (!isEnvelopeText(envelopeText)) return false;
-
-    const std::string viewer = normUser(viewerKey);
-    if (viewer.empty()) return false;
-
-    // 1) 解析 ASCII 信封
-    mail::Envelope env;
-    if (!mail::DigitalEnvelope::Parse(envelopeText, env)) {
-        std::cerr << "[MailCrypto] 信封解密失败：信封解析出错" << std::endl;
-        return false;
-    }
-
-    // 2) 收件人必须有自己的私钥，否则拆不开信封
-    const std::string privP = privKeyPath(viewer, keyDir);
-    if (!fileExists(privP)) {
-        std::cerr << "[MailCrypto] 信封解密失败：用户 " << viewer
-                  << " 没有私钥（请先让该账号登录一次以自动生成密钥）" << std::endl;
-        return false;
-    }
-    mail::RsaKey viewerPriv;
-    if (!mail::RsaKey::LoadPrivateKey(privP, viewerPriv)) return false;
-
-    // 3) 发送方公钥在本地存在则验签；信封本身未签名则只解密不验签
-    EVP_PKEY* verifyKey = nullptr;
-    mail::RsaKey senderPub;
-    const std::string senderUser = normUser(env.from);
-    if (!senderUser.empty() && !env.signature.empty()) {
-        mail::RsaKey tmp;
-        if (mail::RsaKey::LoadPublicKey(pubKeyPath(senderUser, keyDir), tmp)) {
-            senderPub = std::move(tmp);
-            verifyKey = senderPub.get();
-        }
-    }
-
-    std::vector<unsigned char> out;
-    if (!mail::DigitalEnvelope::Open(env, viewerPriv.get(), verifyKey, out)) {
-        std::cerr << "[MailCrypto] 信封解密失败：Open 出错"
-                     "（收件人密钥不匹配 / 内容被篡改 / 签名不符？）" << std::endl;
-        return false;
-    }
-    plainText.assign(out.begin(), out.end());
-    return true;
-}
-
-bool isEnvelopeText(const std::string& text) {
-    return text.find("-----BEGIN MAIL ENVELOPE-----") != std::string::npos;
+bool ensureUserKey(const std::string& userKey, const std::string& keyDir) {
+    std::string dummy;
+    return getUserKey(userKey, dummy, keyDir);
 }
 
 } // namespace MailCrypto

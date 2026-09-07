@@ -28,11 +28,9 @@ const int   kPop3Port     = 1110;    // 本机 MailServer 的 POP3 端口
 const int   kRecvTimeoutSec = 10;    // HTTP 请求读取超时（秒）
 
 // ===================== 加密相关配置 =====================
-// XOR 对称密钥：仅用于解密历史版本用 XOR 通道发出的旧邮件（向后兼容读取）。
-const std::string kCryptoKey = "MailForge-Course-Key-2026";
-// ★ 当前加密通道：数字信封（AES-256-CBC + RSA-2048），见 MailCrypto.h 的
-//   encryptEnvelope / decryptEnvelope。每个用户一对 RSA 密钥，保存在 ./keys/ 下
-//  （keys/<用户名>.key.pem 私钥 / keys/<用户名>.pub.pem 公钥），登录时自动生成。
+// ★ 当前加密通道：自研对称加密（AES-256-CBC / ChaCha20，RFC 8439），见
+//   MailCrypto.h。每个账号一把 32 字节对称密钥文件 keys/<用户名>.key，
+//   首次使用自动生成。发信用收件人密钥加密，收信用本人密钥解密。
 
 // 一封邮件解码后的结果（无论明文还是密文，统一成可展示的形态）
 struct DecodedMail {
@@ -92,12 +90,10 @@ void restoreFromPayload(DecodedMail& dm, const std::string& plain,
 }
 
 // 把一封 POP3 拉回来的原始 .eml 解码成可展示形态。
-// viewerUser 是"正在查看邮件的收件人"（数字信封邮件用它自己的私钥拆封）。
-// 支持三种形态：
-//   1) 明文邮件        → 原样展示；
-//   2) XOR 邮件(历史)  → 正文带 MailForge::ENC::XOR:: 签名头 → decryptPayload 还原；
-//   3) 数字信封邮件    → 正文是 -----BEGIN MAIL ENVELOPE----- 的 ASCII 信封
-//                        （AES-256-CBC + RSA-2048，由 MailCrypto 拆封并自动验签）。
+// viewerUser 是"正在查看邮件的收件人"（加密邮件用他自己账号的密钥解密）。
+// 支持形态：
+//   1) 明文邮件          → 原样展示；
+//   2) 自研加密(AES/CHA) → 正文带 MailForge::ENC::AES/CHA 魔数头 → 自动解密。
 DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
     DecodedMail dm;
     dm.from = HttpServer::parseHeader(raw, "From");
@@ -119,32 +115,24 @@ DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
         }
     }
 
-    // 2) ★ 数字信封邮件：正文区直接就是 ASCII 信封文本
-    if (MailCrypto::isEnvelopeText(bodyPart)) {
+    // 2) ★ 自研加密邮件：正文带 AES/ChaCha20 魔数头，用收件人账号密钥还原
+    if (MailCrypto::isEncryptedText(bodyPart)) {
         dm.encrypted = true;
+        std::string key;
         std::string plain;
-        if (MailCrypto::decryptEnvelope(bodyPart, viewerUser, plain)) {
+        if (MailCrypto::getUserKey(viewerUser, key) &&
+            MailCrypto::decryptPayload(bodyPart, key, plain)) {
             restoreFromPayload(dm, plain, headerPart);
-        } else {
-            // 拆封失败：密钥未初始化 / 收件人不匹配 / 密文被篡改等情况
-            dm.subject = "(加密邮件，无法解密)";
-            dm.display = headerPart + "\r\n\r\n" + bodyPart;   // 原文保留可导出
-            std::cerr << "[HTTP] 数字信封邮件无法解密（收件人视角: "
-                      << viewerUser << "）" << std::endl;
+            return dm;
         }
+
+        // 解密失败：密钥缺失/不匹配/密文被篡改等情况
+        dm.subject = "(加密邮件，无法解密)";
+        dm.display = headerPart + "\r\n\r\n" + bodyPart;   // 原文保留可导出
         return dm;
     }
 
-    // 3) 兼容历史 XOR 通道邮件：正文带 MailForge::ENC::XOR:: 签名头
-    const std::string magic(MailCrypto::kEncMagicXor);
-    if (bodyPart.compare(0, magic.size(), magic) == 0) {
-        dm.encrypted = true;
-        restoreFromPayload(dm, MailCrypto::decryptPayload(bodyPart, kCryptoKey),
-                           headerPart);
-        return dm;
-    }
-
-    // 4) 明文邮件：原样展示
+    // 3) 明文邮件：原样展示
     dm.display = raw;
     dm.subject = HttpServer::parseHeader(raw, "Subject");
     if (dm.subject.empty()) dm.subject = "(无主题)";
@@ -883,6 +871,14 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     if (from.empty()) from = session.user + "@example.com";
 
     bool wantEncrypt = (getParam(req, "encrypt") == "1");
+    std::string algoName = getParam(req, "algo");   // "aes" / "chacha"，可缺省
+    if (!wantEncrypt && (algoName == "aes" || algoName == "chacha")) {
+        wantEncrypt = true;
+    }
+    if (wantEncrypt && algoName != "aes" && algoName != "chacha") {
+        resp.body = jsonResult(false, "未知加密算法（仅支持 aes / chacha）");
+        return;
+    }
 
     // ---- 附件参数（可选）：filename = 文件名，fileB64 = 文件内容的 Base64 ----
     std::string filename = getParam(req, "filename");
@@ -914,23 +910,29 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     if (wantEncrypt) {
         // ===================== 加密挂钩点①（发送前） =====================
         // 把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷，
-        // 交给 MailCrypto::encryptEnvelope() 做数字信封：
-        //   AES-256-CBC 加密正文 → RSA-2048 加密会话密钥 → 发件人私钥签名。
-        // 输出的 ASCII 信封文本可直接进 SMTP DATA，服务器只落盘看不到明文；
+        // 用【收件人】的对称密钥按所选算法（AES-256-CBC / ChaCha20，自研）
+        // 整体加密后再交给 SMTP 传输 → SMTP/POP3 链路上与 .eml 落盘都是密文，
+        // 收件人阅读时（decodeMail）用自己账号的密钥还原。
         // 头部只留 Subject: [加密邮件] 占位与 X-MailForge-Crypto 标记。
-        // 读取端 decodeMail() 用收件人私钥拆封，还原主题与 multipart 正文，
-        // 附件照常可下载（信封内仍是一份标准 multipart 邮件）。
+        if (algoName.empty()) algoName = "aes";
         mailSubject = "[加密邮件]";
-        std::string envelope = "Subject: " + subject + "\r\n\r\n" + payload;
-        std::string envText;
-        if (!MailCrypto::encryptEnvelope(envelope, from, to, envText)) {
+        std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
+        std::string symKey;
+        if (!MailCrypto::getUserKey(to, symKey)) {
             resp.body = jsonResult(false,
-                "加密失败：无法生成/加载发件人或收件人的 RSA 密钥，请检查 keys/ 目录");
+                "加密失败：无法生成/读取收件人密钥，请检查 keys/ 目录");
             return;
         }
-        payload = envText + "\r\n";
+        const MailCrypto::CryptoAlgo algo = (algoName == "chacha")
+            ? MailCrypto::ALGO_CHACHA20 : MailCrypto::ALGO_AES_CBC;
+        std::string cipher = MailCrypto::encryptPayload(inner, symKey, algo);
+        if (cipher.empty()) {
+            resp.body = jsonResult(false, "加密失败：加密算法内部出错");
+            return;
+        }
+        payload = cipher + "\r\n";
         mimeHeaders.clear();                          // 密文不再是 multipart，不挂 MIME 头
-        cryptoHeader = "X-MailForge-Crypto: envelope\r\n";
+        cryptoHeader = "X-MailForge-Crypto: " + algoName + "\r\n";
     }
 
     std::string plain =
@@ -983,8 +985,8 @@ void HttpServer::handleInbox(const HttpRequest& req, HttpResponse& resp) {
         if (!pop3.retr(mails[i].number, raw)) continue;
 
         // ===================== 加密挂钩点②（收取后解密） =====================
-        // decodeMail 会自动识别信封/XOR 加密邮件，并用收件人（session.user）的
-        // 私钥拆封还原主题/正文（见匿名命名空间实现）
+        // decodeMail 会自动识别 AES/ChaCha20 加密邮件，并用收件人（session.user）
+        // 账号的对称密钥解密还原主题/正文（见匿名命名空间实现）
         DecodedMail decoded = decodeMail(raw, session.user);
         std::string subject = decoded.subject;
         std::string from    = decoded.from;
@@ -1152,8 +1154,9 @@ void HttpServer::handleDelete(const HttpRequest& req, HttpResponse& resp) {
 
 
 // ==================== GET /api/benchmark ====================
-// 性能压测：连发 100 封带约 1MB 附件(multipart)的邮件，统计发送成功率与"丢包率"，
-// 测完自动清理测试邮件。
+// 性能压测：连发 100 封带约 1MB 附件(multipart)的邮件，统计成功率/丢包率/时延，
+// 测完自动清理测试邮件。支持明文 / AES-256-CBC 加密 / ChaCha20 加密 / 三种全跑。
+// 参数：token；encrypt = plain | aes | chacha | all（缺省 plain）
 void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
     Session session;
     if (!loginAndGetSession(getParam(req, "token"), session)) {
@@ -1161,8 +1164,23 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    const int kCount = 100;              // 连续发送 100 封
-    const size_t kFileBytes = 786432;    // 附件"原始文件"786KB → base64 后单封 >1MB
+    const int kCount = 100;              // 每种模式连续发送 100 封
+    const size_t kFileBytes = 786432;    // 附件"原始文件"786KB → base64 后 >1MB
+
+    // 选择测试模式
+    std::string modeParam = getParam(req, "encrypt");
+    if (modeParam.empty() || modeParam == "0" || modeParam == "none") modeParam = "plain";
+    if (modeParam == "1") modeParam = "aes";   // 兼容旧参数
+    std::vector<std::string> modes;
+    if (modeParam == "all" || modeParam == "both") {
+        modes = {"plain", "aes", "chacha"};
+    } else if (modeParam == "plain" || modeParam == "aes" || modeParam == "chacha") {
+        modes = {modeParam};
+    } else {
+        resp.body = jsonResult(false, "encrypt 参数只能是 plain / aes / chacha / all");
+        return;
+    }
+
     std::string to   = session.user + "@example.com";
     std::string from = to;
 
@@ -1171,19 +1189,17 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
-    // 1) 记录压测前的邮箱基准
-    int baseCount = 0;
-    long long baseBytes = 0;
+    // 预检：账号能登录 POP3（后续每轮统计也依赖它）
     {
-        Pop3Client cnt(kMailServerIp, kPop3Port);
-        if (!cnt.login(session.user, session.pass) || !cnt.stat(baseCount, baseBytes)) {
-            resp.body = jsonResult(false, "压测前读取邮箱失败，请确认账号密码正确");
+        Pop3Client pre(kMailServerIp, kPop3Port);
+        if (!pre.login(session.user, session.pass)) {
+            resp.body = jsonResult(false, "压测前登录失败，请确认账号密码正确");
             return;
         }
-        cnt.quit();
+        pre.quit();
     }
 
-    // 2) 构造约 1MB 的"附件"邮件：模拟 786KB 文件内容 → base64 → MIME multipart
+    // 构造约 1MB 的"附件"邮件：786KB 文件 → base64 → MIME multipart
     std::string fileContent(kFileBytes, 'Z');
     std::string fileB64 = MailCrypto::base64Encode(fileContent);
     std::string boundary = "MailForgeBench" + std::to_string((long)time(nullptr))
@@ -1195,86 +1211,175 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                                             "[压测附件].bin", fileB64);
     const size_t mailBytes = payload.size() + 400;   // 单封落盘估算，>1MB
 
-    // 3) 连续发送 100 封并逐封计时
-    long long startMs = nowMs();
-    int smtpOk = 0, smtpFail = 0;
-    long long totalLatencyMs = 0;
-    std::cout << "[HTTP] 压测开始：" << session.user << " 连发 " << kCount
-              << " 封 " << (mailBytes / 1024) << "KB 附件邮件..." << std::endl;
+    // 单轮压测：mode = plain / aes / chacha。返回该轮 JSON 片段并打印日志。
+    auto runRound = [&](const std::string& mode) -> std::string {
+        const bool isEnc = (mode != "plain");
+        MailCrypto::CryptoAlgo algo =
+            (mode == "chacha") ? MailCrypto::ALGO_CHACHA20
+            : (mode == "aes")  ? MailCrypto::ALGO_AES_CBC
+            : MailCrypto::ALGO_NONE;
 
-    for (int i = 0; i < kCount; ++i) {
-        long long t0 = nowMs();
-        SmtpClient smtp(kMailServerIp, kSmtpPort);
-        std::string subject = "[压测] 第 " + std::to_string(i + 1)
-                            + "/" + std::to_string(kCount) + " 封";
-        std::string raw =
-            "From: " + from + "\r\n"
-            "To: " + to + "\r\n"
-            "Subject: " + subject + "\r\n"
-            + mimeHeaders + "\r\n" + payload;
-        bool ok = smtp.sendRawMail(from, to, raw);
-        long long el = nowMs() - t0;
-        if (ok) { ++smtpOk; totalLatencyMs += el; }
-        else {
-            ++smtpFail;
-            std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
-                      << smtp.getLastError() << std::endl;
+        // 加密轮：准备本账号对称密钥（发给自己，收发用同一把）
+        std::string symKey;
+        const bool keyReady = !isEnc || MailCrypto::getUserKey(to, symKey);
+
+        // a) 压测前邮箱基准
+        int baseCount = 0;
+        long long baseBytes = 0;
+        {
+            Pop3Client cnt(kMailServerIp, kPop3Port);
+            if (!cnt.login(session.user, session.pass)) return "";
+            cnt.stat(baseCount, baseBytes);
+            cnt.quit();
         }
-        if (i % 10 == 9) usleep(200 * 1000);
-    }
-    long long sendMs = nowMs() - startMs;
 
-    // 4) 收件端统计
-    int afterCount = 0;
-    long long afterBytes = 0;
-    int received = 0;
-    {
-        Pop3Client cnt(kMailServerIp, kPop3Port);
-        if (cnt.login(session.user, session.pass) && cnt.stat(afterCount, afterBytes)) {
-            received = afterCount - baseCount;
-            if (received < 0) received = 0;
-        }
-        cnt.quit();
-    }
-    int lost = kCount - received;
-    double lossRate = (lost * 100.0) / kCount;
-    double avgLatencyMs = smtpOk > 0 ? (double)totalLatencyMs / smtpOk : 0.0;
-    std::cout << "[HTTP] 压测结束：发送成功 " << smtpOk << "/" << kCount
-              << "，实际收到 " << received << "，丢包率 " << lossRate
-              << "% （发送耗时 " << (sendMs / 1000) << "s）" << std::endl;
+        // b) 连续发送 kCount 封并逐封计时
+        int smtpOk = 0, smtpFail = 0;
+        long long totalLatencyMs = 0;
+        const long long roundStart = nowMs();
+        std::cout << "[HTTP] 压测轮 " << mode << "：" << session.user << " 连发 "
+                  << kCount << " 封约 " << (mailBytes / 1024) << "KB 邮件..."
+                  << std::endl;
 
-    // 5) 清理测试邮件
-    if (received > 0) {
-        Pop3Client cleaner(kMailServerIp, kPop3Port);
-        if (cleaner.login(session.user, session.pass)) {
-            std::vector<Pop3MailInfo> list;
-            if (cleaner.list(list)) {
-                int deleted = 0;
-                for (size_t i = list.size(); i > 0 && deleted < received; --i) {
-                    if (cleaner.dele(list[i - 1].number)) ++deleted;
+        for (int i = 0; i < kCount; ++i) {
+            long long t0 = nowMs();
+            std::string subject = "[压测] 第 " + std::to_string(i + 1)
+                                + "/" + std::to_string(kCount) + " 封";
+            std::string raw;
+            if (!isEnc) {
+                raw = "From: " + from + "\r\n"
+                      "To: " + to + "\r\n"
+                      "Subject: " + subject + "\r\n"
+                      + mimeHeaders + "\r\n" + payload;
+            } else {
+                // 加密轮：真实主题+正文(含附件)整体加密后再进 SMTP，落盘只有密文
+                std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
+                std::string cipher =
+                    keyReady ? MailCrypto::encryptPayload(inner, symKey, algo) : "";
+                if (cipher.empty()) {
+                    ++smtpFail;
+                    std::cerr << "[HTTP] 第" << (i + 1) << "封加密失败("
+                              << mode << ")" << std::endl;
+                    continue;
                 }
-                std::cout << "[HTTP] 压测清理：删除 " << deleted
-                          << " 封测试邮件，收件箱已还原" << std::endl;
+                raw = "From: " + from + "\r\n"
+                      "To: " + to + "\r\n"
+                      "Subject: [加密邮件]\r\n"
+                      "X-MailForge-Crypto: " + mode + "\r\n"
+                      "\r\n" + cipher + "\r\n";
             }
-            cleaner.quit();
+
+            SmtpClient smtp(kMailServerIp, kSmtpPort);
+            const bool ok = smtp.sendRawMail(from, to, raw);
+            const long long el = nowMs() - t0;
+            if (ok) { ++smtpOk; totalLatencyMs += el; }
+            else {
+                ++smtpFail;
+                std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
+                          << smtp.getLastError() << std::endl;
+            }
+            if (i % 10 == 9) usleep(200 * 1000);
         }
+
+        // c) 收件端统计
+        int afterCount = 0, received = 0;
+        long long afterBytes = 0;
+        {
+            Pop3Client cnt(kMailServerIp, kPop3Port);
+            if (cnt.login(session.user, session.pass) &&
+                cnt.stat(afterCount, afterBytes)) {
+                received = afterCount - baseCount;
+                if (received < 0) received = 0;
+            }
+            cnt.quit();
+        }
+
+        // d) 加密轮：逐封 RETR 并解密，验证"密文可被正确还原"
+        int decryptOk = 0;
+        if (isEnc && received > 0) {
+            Pop3Client ver(kMailServerIp, kPop3Port);
+            if (ver.login(session.user, session.pass)) {
+                std::vector<Pop3MailInfo> list;
+                if (ver.list(list)) {
+                    int n = 0;
+                    for (size_t k = list.size(); k > 0 && n < received; --k) {
+                        std::string raw;
+                        if (!ver.retr(list[k - 1].number, raw)) continue;
+                        const DecodedMail dm = decodeMail(raw, session.user);
+                        if (dm.display.find("[压测附件].bin") != std::string::npos)
+                            ++decryptOk;
+                        ++n;
+                    }
+                }
+                ver.quit();
+            }
+        }
+
+        // e) 清理本轮测试邮件
+        if (received > 0) {
+            Pop3Client cleaner(kMailServerIp, kPop3Port);
+            if (cleaner.login(session.user, session.pass)) {
+                std::vector<Pop3MailInfo> list;
+                if (cleaner.list(list)) {
+                    int deleted = 0;
+                    for (size_t k = list.size(); k > 0 && deleted < received; --k) {
+                        if (cleaner.dele(list[k - 1].number)) ++deleted;
+                    }
+                }
+                cleaner.quit();
+            }
+        }
+
+        // f) 结果统计
+        const int lost = kCount - received;
+        const double lossRate = (lost * 100.0) / kCount;
+        const double avgLatencyMs =
+            smtpOk > 0 ? (double)totalLatencyMs / smtpOk : 0.0;
+        std::cout << "[HTTP] 压测轮 " << mode << " 结束：发送成功 " << smtpOk
+                  << "/" << kCount << "，实际收到 " << received
+                  << "，丢包率 " << lossRate << "%"
+                  << (isEnc ? "，解密还原 " + std::to_string(decryptOk) : "")
+                  << std::endl;
+
+        return std::string("{")
+            + "\"mode\":\"" + mode + "\""
+            + ",\"encrypted\":" + (isEnc ? "true" : "false")
+            + ",\"count\":" + std::to_string(kCount)
+            + ",\"smtpOk\":" + std::to_string(smtpOk)
+            + ",\"smtpFail\":" + std::to_string(smtpFail)
+            + ",\"received\":" + std::to_string(received)
+            + ",\"decryptOk\":" + std::to_string(decryptOk)
+            + ",\"lost\":" + std::to_string(lost)
+            + ",\"lossRate\":" + std::to_string(lossRate)
+            + ",\"avgLatencyMs\":" + std::to_string(avgLatencyMs)
+            + ",\"totalMs\":" + std::to_string(nowMs() - roundStart)
+            + "}";
+    };
+
+    // 3) 依次跑完各模式
+    std::string resultsJson;
+    long long startMs = nowMs();
+    for (size_t m = 0; m < modes.size(); ++m) {
+        const std::string rj = runRound(modes[m]);
+        if (rj.empty()) {
+            resp.body = jsonResult(false, "压测中断：POP3 会话失败");
+            return;
+        }
+        if (!resultsJson.empty()) resultsJson += ",";
+        resultsJson += rj;
     }
 
-    // 6) JSON 结果
+    // 汇总（用于 JSON 顶层与"全部模式"的概览）
     resp.contentType = "application/json; charset=utf-8";
     resp.body =
         std::string("{\"ok\":true")
-        + ",\"count\":" + std::to_string(kCount)
+        + ",\"modes\":[" + resultsJson + "]"
         + ",\"sizeBytes\":" + std::to_string(mailBytes)
-        + ",\"smtpOk\":" + std::to_string(smtpOk)
-        + ",\"smtpFail\":" + std::to_string(smtpFail)
-        + ",\"received\":" + std::to_string(received)
-        + ",\"lost\":" + std::to_string(lost)
-        + ",\"lossRate\":" + std::to_string(lossRate)
-        + ",\"avgLatencyMs\":" + std::to_string(avgLatencyMs)
+        + ",\"count\":\"" + modeParam + "\""
         + ",\"totalMs\":" + std::to_string(nowMs() - startMs)
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
 }
+
 
 // ==================== 交互式协议终端（一问一答，保持连接） ====================
 namespace {

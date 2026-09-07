@@ -1,12 +1,14 @@
-// aes.hpp —— AES-256-CBC 对称加密
+// aes.hpp —— AES-256-CBC 对称加密（自研实现，不依赖 OpenSSL）
 //
 // 算法参数：
 //   密钥 32 字节（256 bit），IV 16 字节（128 bit）
-//   填充方式：PKCS#7（OpenSSL 默认）
-//   实现：OpenSSL 3.0 EVP 高级 API（EVP_aes_256_cbc）
+//   填充方式：PKCS#7
+//   实现：纯 C++ 自研（S 盒由 GF(2^8) 生成，CBC + PKCS#7 自写）
+//   随机密钥/IV：读系统 CSPRNG（/dev/urandom 或 BCryptGenRandom）
 //
 // 注意：Encrypt/Decrypt 失败时返回 false 并写 ERROR 日志；
 //       GenerateKey/GenerateIv 失败时抛出 std::runtime_error（仅熵耗尽等灾难性情况）。
+// 官方验收向量：NIST SP 800-38A F.2.3（见 crypto/tests/test_crypto.cpp）
 #ifndef MAIL_CRYPTO_AES_HPP_
 #define MAIL_CRYPTO_AES_HPP_
 

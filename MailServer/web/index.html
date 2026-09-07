@@ -51,7 +51,12 @@
   收件人:<input id="inTo" placeholder="如 alice@example.com" style="width:60%"><br>
   主题  :<input id="inSubject" style="width:60%"><br>
   正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
-  <label><input type="checkbox" id="inEncrypt"> 发送时加密（数字信封 AES-256 + RSA-2048）</label><br>
+   <label>发送时加密：
+     <select id="inAlgo">
+       <option value="none">不加密</option>
+       <option value="aes" selected>🔐 AES-256-CBC（自研）</option>
+       <option value="chacha">🔐 ChaCha20（自研）</option>
+     </select></label><br>
   附件:<input type="file" id="inFile" onchange="onFilePick()">
   <span id="fileInfo"></span><br>
   <button onclick="doSend()">发送</button>
@@ -70,9 +75,18 @@
 
 <!-- 性能压测 -->
 <div class="card" id="cardBench" style="display:none">
-  <h3>⚡ 性能压测（100 封 1MB+ 邮件）</h3>
-  <p>连续向自己发送 100 封约 1MB 的邮件，统计发送成功率与<b>丢包率</b>，
-     测完自动清理测试邮件。约需 30~90 秒，期间请勿关闭页面。</p>
+  <h3>⚡ 性能压测（每模式 100 封 1MB+ 邮件，含加密通道）</h3>
+  <p>模式：
+    <select id="benchMode">
+      <option value="plain">明文</option>
+      <option value="aes">🔐 AES-256-CBC 加密</option>
+      <option value="chacha">🔐 ChaCha20 加密</option>
+      <option value="all">三种全跑（明文 + AES + ChaCha）</option>
+    </select>
+  </p>
+  <p>连续向自己发送约 1MB 的邮件，统计发送成功率 / 丢包率 / 平均时延；
+     加密模式还会逐一 RETR 验证“密文可被正确解密还原”，测完自动清理。
+     每模式约 30~90 秒（选“三种全跑”约 2~4 分钟），期间请勿关闭页面。</p>
   <button id="btnBench" onclick="runBench()">开始压测</button>
   <span id="benchMsg"></span>
   <div id="benchResult" style="display:none; margin-top:10px; line-height:1.9;"></div>
@@ -167,7 +181,8 @@ function onFilePick(){
 
 async function doSend(){
   const obj = { token: TOKEN, to: inTo.value.trim(), subject: inSubject.value, body: inBody.value };
-  if (document.getElementById("inEncrypt").checked) obj.encrypt = "1";
+  const algo = document.getElementById("inAlgo").value;
+  if (algo !== "none"){ obj.encrypt = "1"; obj.algo = algo; }
   if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
   const j = await post("/api/send", obj);
   setMsg("sendMsg", j.msg, !j.ok);
@@ -196,29 +211,41 @@ async function loadInbox(){
 }
 
 async function runBench(){
-  const btn = document.getElementById("btnBench");
-  const msg = document.getElementById("benchMsg");
-  const box = document.getElementById("benchResult");
+  const btn  = document.getElementById("btnBench");
+  const msg  = document.getElementById("benchMsg");
+  const box  = document.getElementById("benchResult");
+  const mode = document.getElementById("benchMode").value;
   btn.disabled = true;
   box.style.display = "none";
-  msg.textContent = "⏳ 压测进行中（发送 100 封 1MB+ 邮件）… 请稍候";
+  msg.textContent = "⏳ 压测进行中（" + mode + "，每模式 100 封 1MB+ 邮件）… 请稍候";
   msg.className = "";
   try{
-    const r = await fetch("/api/benchmark?token=" + encodeURIComponent(TOKEN));
+    const r = await fetch("/api/benchmark?token=" + encodeURIComponent(TOKEN)
+                          + "&encrypt=" + encodeURIComponent(mode));
     const j = await r.json();
     if (!j.ok){ msg.textContent = j.msg; msg.className = "err"; return; }
     msg.textContent = "";
     const mb = (j.sizeBytes / 1048576).toFixed(2);
     const sec = (j.totalMs / 1000).toFixed(1);
-    const okStyle = j.lossRate > 0 ? "color:#c00" : "color:#080";
     box.style.display = "";
-    box.innerHTML =
-      "📮 发送 <b>" + j.count + "</b> 封 × " + mb + " MB<br>"
-      + "✅ SMTP 发送成功: <b>" + j.smtpOk + "</b>　❌ 失败: " + j.smtpFail + "<br>"
-      + "📥 收件端实际收到: <b>" + j.received + "</b> / " + j.count + "<br>"
-      + "📉 丢包率: <b style='" + okStyle + "'>" + j.lossRate + "%</b><br>"
-      + "⏱ 总耗时 " + sec + " 秒（其中发送阶段 " + (j.totalMs/1000 - (j.totalMs - j.avgLatencyMs*j.smtpOk)/1000).toFixed(1)
-      + " 秒），平均单封 " + j.avgLatencyMs.toFixed(0) + " ms<br>"
+    const nameOf = { plain:"📄 明文", aes:"🔐 AES-256-CBC", chacha:"🔐 ChaCha20" };
+    let rows = "";
+    for (const m of j.modes){
+      const okStyle = m.lossRate > 0 ? "color:#c00" : "color:#080";
+      rows += "<tr><td>" + (nameOf[m.mode] || m.mode) + "</td>"
+            + "<td>" + m.smtpOk + " / " + m.count + "</td>"
+            + "<td>" + m.received + "</td>"
+            + "<td>" + (m.encrypted ? m.decryptOk : "-") + "</td>"
+            + "<td><b style='" + okStyle + "'>" + m.lossRate + "%</b></td>"
+            + "<td>" + m.avgLatencyMs.toFixed(1) + " ms</td>"
+            + "<td>" + (m.totalMs/1000).toFixed(1) + " s</td></tr>";
+    }
+    box.innerHTML = "📮 每模式发送 <b>" + j.modes[0].count + "</b> 封 × " + mb + " MB<br>"
+      + "<table style='margin-top:6px'><tr>"
+      + "<th>模式</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>"
+      + "<th>丢包率</th><th>平均时延</th><th>该轮耗时</th></tr>"
+      + rows + "</table>"
+      + "⏱ 总耗时 " + sec + " 秒<br>"
       + "<span style='color:#888'>测试邮件已自动清理，收件箱已还原</span>";
   }catch(e){
     msg.textContent = "压测请求失败: " + e;

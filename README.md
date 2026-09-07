@@ -6,7 +6,7 @@ MailForge 是一个从零实现的课程级邮件系统：
 
 - 原生 **Socket 编程**手写 **SMTP（RFC 5321）发送** 与 **POP3（RFC 1939）收取** 协议，不依赖任何现成协议库；
 - 自带 **Web 收发界面**（HTTP 服务器手写 REST 接口）与**多用户邮箱隔离**（邮件按 `.eml` 标准格式落盘，重启不丢失）；
-- 集成**数字信封加密**（AES-256-CBC + RSA-2048，OpenSSL 3.0）——加密子系统 `crypto/`、`common/` 由搭档 zuumm594-art 开发后并入本仓库，实现从浏览器到收件人的**端到端加密**。
+- 集成**自研对称加密**（AES-256-CBC + ChaCha20，RFC 8439）——加密子系统 `crypto/`、`common/` 为纯 C++ 自研实现（不依赖 OpenSSL），发信时可选算法将整封邮件加密后再进入 SMTP/POP3 传输，落盘只有密文。
 
 ---
 
@@ -18,7 +18,7 @@ MailForge 是一个从零实现的课程级邮件系统：
 | 多用户邮箱 | 每个账号独立收件目录 `./mailbox/<用户名>/`，账号表 `users.txt` |
 | Web 界面 | 注册 / 登录 / 写邮件 / 收件箱 / 阅读 / 删除 / 附件上传下载，端口 8080 |
 | 邮件附件 | MIME multipart，可与加密叠加（附件随正文一起封进信封） |
-| 端到端加密 | 数字信封（AES-256-CBC + RSA-2048 + SHA-256 签名），勾选即加密 |
+| 邮件加密 | 自研对称加密：**AES-256-CBC** + **ChaCha20（RFC 8439）**，两种算法可切换；发送前加密、收信自动解密，SMTP/POP3 传输与 `.eml` 落盘均为密文（无 OpenSSL 依赖） |
 | 协议演示终端 | `demo_smtp.html` / `demo_pop3.html`：在浏览器里像 telnet 一样手敲命令 |
 | 性能压测 | 网页一键连发 100 封 1MB+ 附件邮件，统计成功率 / 平均时延 / 丢包率 |
 
@@ -39,7 +39,7 @@ MailForge 是一个从零实现的课程级邮件系统：
 
 - 三个服务器共用网络基类 `Server`（socket → bind → listen → accept → 每连接一线程），协议子类只需实现 `handleClient`。
 - SMTP 投递、POP3 读取、Web 收发都围绕同一份 `.eml` 存储，天然一致。
-- **加密与协议解耦**：加密发生在 HTTP 层的发送前 / 收取后（`MailCrypto` 模块）；SMTP/POP3 服务器对密文完全透明，所以加密通道与非加密通道、以及外部标准邮件客户端（Outlook/python）收发都不受影响。
+- **加密与协议解耦**：加密发生在 HTTP 层的发送前 / 收取后（`MailCrypto` 模块，自研 AES-256-CBC / ChaCha20）；SMTP/POP3 服务器对密文完全透明，加密通道与非加密通道、以及外部标准邮件客户端收发都不受影响。
 
 ## 三、目录结构
 
@@ -58,18 +58,16 @@ MailForge/
 │   ├── setup_portproxy.bat # Windows 局域网/ZeroTier 访问端口转发脚本
 │   ├── keys/             #   RSA 密钥（运行时生成，勿提交）
 │   └── mailbox/          #   邮件落盘目录（运行时生成，勿提交）
-├── crypto/               # 加密子系统（mail:: 命名空间，OpenSSL）
-│   ├── aes / rsa / envelope / openssl_util  # AES-256-CBC / RSA-2048 / 数字信封
-│   ├── tests/            #   单元自测（test_crypto 44 项等）
-│   ├── tools/            #   命令行加密工具 + tkinter 图形演示
-│   ├── docs/             #   加密学习文档
-│   └── practice/         #   信封练习代码
+├── crypto/               # 加密子系统（mail:: 命名空间，纯自研，无 OpenSSL）
+│   ├── aes / chacha20 / random   # AES-256-CBC / ChaCha20(RFC 8439) / CSPRNG
+│   ├── tests/            #   单元自测（AES 过 NIST SP800-38A、ChaCha20 过 RFC 8439 向量）
+│   └── docs/             #   加密学习文档
 └── common/               # 加密子系统公共库：base64 / logger / file_util / socket
 ```
 
 ## 四、快速开始
 
-环境：Linux（或 WSL2 / MSYS2） + `g++`（C++17） + `make` + OpenSSL 3.0（`libssl-dev`）。
+环境：Linux（或 WSL2 / MSYS2）+ `g++`（C++17）+ `make`。**无需 OpenSSL**：加密算法（AES-256-CBC / ChaCha20）为仓库内纯 C++ 自研实现。
 
 ```bash
 make server        # 编译服务器（含加密子系统），产物 MailServer/mail_server
@@ -81,36 +79,19 @@ make clean         # 清理全部产物
 
 启动后在浏览器打开 **http://localhost:8080**，用 `bob` / `alice`（密码均为 `123456`）登录即可收发。
 
-## 五、端到端加密（数字信封）
+## 五、邮件加密（自研 AES-256-CBC + ChaCha20）
 
-MailForge 的默认加密通道是**数字信封**，由加密子系统（`crypto/`）实现：
+MailForge 的加密通道是**纯 C++ 自研的对称加密**（不依赖 OpenSSL，见 `crypto/`）：
 
-1. 写邮件时勾选「发送时加密」或调用 `/api/send` 时带 `encrypt=1`；
-2. 发送端把「真实主题 + 正文（含附件 multipart）」打包，用**收件人的 RSA 公钥**封成信封：
-   - AES-256-CBC 加密正文内容；
-   - RSA-2048 加密随机生成的 AES 会话密钥（公钥加密，只有收件人私钥能解）；
-   - 发件人 RSA 私钥对密文做 SHA-256 签名（防篡改 + 身份认证）。
-3. SMTP 传输、服务器落盘、POP3 下载全程只看到一段 ASCII 信封文本，**看不到任何明文**；
-4. 收件人阅读时用**自己的私钥**自动拆封，并用发件人公钥验签，正文与主题原样还原。
+1. 写邮件时选择加密算法（**AES-256-CBC** 或 **ChaCha20**，RFC 8439）并勾选「发送时加密」；
+2. 发送端把「真实主题 + 正文（含附件 multipart）」打包，用**收件人账号的对称密钥**（`keys/<用户名>.key`，32 字节随机，首次使用自动生成）整体加密；
+3. SMTP 传输、服务器落盘、POP3 下载全程只看到一段密文正文（`MailForge::ENC::AES::` / `MailForge::ENC::CHA::` 头 + Base64），**看不到任何明文**；
+4. 收件人阅读时用自己账号的密钥自动解密，正文与主题原样还原。
 
-密钥管理是零配置的：每个用户在 **POP3 登录成功时**自动生成一对 RSA-2048 密钥，存放在
-`MailServer/keys/`（`<用户名>.key.pem` 私钥、`<用户名>.pub.pem` 公钥）。历史版本用 XOR
-通道发出的邮件仍可正常读取（向后兼容）。
+两个算法都是自研实现并通过官方向量回归：**AES-256-CBC 过 NIST SP 800-38A**、**ChaCha20 过 RFC 8439 §2.3.2**（`make test-crypto`）。密钥管理零配置，登录或首次收发时自动生成。
 
-信封的 ASCII 落地格式示例（`.eml` 正文区）：
+> 说明：由于收发加解密都发生在服务器进程内（B/S 架构的信任边界即服务器），本加密保证的是**SMTP/POP3 传输与磁盘存储密文化**；每封邮件随机 IV/nonce，AES 含 PKCS#7 填充校验，ChaCha20 通过解密后的载荷头做最终校验。这是课程邮件系统的常见实现口径，与 TLS/HTTPS（传输层会话加密）是不同的层次。
 
-```text
------BEGIN MAIL ENVELOPE-----
-Version: 1.0
-Cipher: AES-256-CBC
-From: alice@example.com
-To: bob@example.com
-EncKey: <Base64：RSA-2048 加密的 AES 会话密钥>
-IV: <Base64：AES 初始化向量>
-Signature: <Base64：发件人签名>
-Body: <Base64：AES-256-CBC 密文，每 76 字符换行>
------END MAIL ENVELOPE-----
-```
 
 ## 六、端口与账号约定
 
@@ -126,9 +107,9 @@ Body: <Base64：AES-256-CBC 密文，每 76 字符换行>
 ## 七、测试情况
 
 - **协议端到端**：SMTP 发信 → 自动投递 `./mailbox/bob/` → POP3 登录收取，含中文、附件、点填充、删除语义、多用户隔离等场景。
-- **加密端到端**：加密发送 → 落盘确认为 ASCII 信封（主题/正文/附件明文均未泄漏）→ 收件人自动拆封还原 → 附件下载字节与发送完全一致；明文通道不受影响。
-- **性能压测**：连发 100 封 ~1MB 附件邮件：发送 100/100、丢包率 0%、平均单封约 40ms（网页 `/api/benchmark` 可复现，测完自动清理）。
-- **加密子系统自测**：`make test-crypto` —— base64 / logger / socket / crypto 四套共 100+ 项全部通过。
+- **加密端到端**：加密发送 → 落盘确认正文为 `MailForge::ENC::AES::` / `MailForge::ENC::CHA::` 密文（主题/正文/附件明文均未泄漏）→ 收件人读取自动解密还原；明文通道不受影响。
+- **性能压测（含加密）**：网页 `/api/benchmark` 可选 明文 / AES-256-CBC / ChaCha20 / 三种全跑。实测每模式连发 100 封 ~1MB 邮件：发送 100/100、丢包率 0%、加密邮件逐封解密还原 100/100；AES 平均单封约 100ms、ChaCha20 约 60ms（远低于 2s 指标），测完自动清理。
+- **加密子系统自测**：`make test-crypto` —— base64 / logger / socket / crypto 全部通过；AES-256-CBC 匹配 NIST SP 800-38A 官方向量，ChaCha20 匹配 RFC 8439 §2.3.2 官方向量。
 
 复测方法：先 `make run` 启动服务器，然后网页操作；协议层可用 Python `smtplib` / `poplib` 或
 `./MailServer/mail_client_test` 复测。
@@ -139,10 +120,9 @@ Body: <Base64：AES-256-CBC 密文，每 76 字符换行>
 
 | 地址 | 说明 |
 |---|---|
-| `http://localhost:8080/` | Web 邮箱主界面（登录 / 收发 / 加密 / 附件 / 压测） |
+| `http://localhost:8080/` | Web 邮箱主界面（登录 / 收发 / 加密算法选择 / 附件 / 压测） |
 | `http://localhost:8080/demo_smtp.html` | SMTP 协议演示终端（浏览器手敲命令） |
 | `http://localhost:8080/demo_pop3.html` | POP3 协议演示终端 |
-| `crypto/tools/crypto_cli` | 加密子系统命令行工具（`make demo-crypto` 后可用） |
 
 局域网 / ZeroTier 演示：运行 `MailServer/setup_portproxy.bat` 配置 Windows 端口转发后，
 用 `http://<本机IP>:8080` 访问。

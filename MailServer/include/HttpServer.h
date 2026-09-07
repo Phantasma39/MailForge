@@ -9,9 +9,10 @@
 //  对外接口一览（都用 GET/POST + 表单参数，返回 JSON）：
 //    POST /api/login    参数: user, pass          → 登录，返回 {token}
 //    POST /api/logout   参数: token               → 退出登录
-//    POST /api/send     参数: token,to,subject,body[,from][,encrypt]
-//                                              → 发邮件（encrypt=1 走加密通道）
-//    GET  /api/inbox?token=xxx                    → 收件箱列表（含主题/发件人）
+//    POST /api/send     参数: token,to,subject,body[,from][,encrypt][,algo]
+//                                              → 发邮件（encrypt=1 加密；algo=aes|chacha）
+//    GET  /api/benchmark?token=xxx[&encrypt=plain|aes|chacha|all]
+//                                              → 性能压测（含加密通道收发）
 //    GET  /api/mail?token=xxx&n=编号              → 读某一封完整原文
 //    POST /api/delete   参数: token, n            → 删除某一封（POP3 DELE+QUIT）
 //    GET  /             → 静态页面（web/ 目录）
@@ -20,8 +21,8 @@
 //  能过就说明账号有效——这样 Web 登录和 POP3 认证天然是同一套账号（users.txt）。
 //
 //  加密挂钩点：
-//    /api/send 与收信解析处已经预留了 MailCrypto 调用（见 MailCrypto.h），
-//    encrypt=1 时发信前对整封邮件原文加密（当前 XOR 可运行，AES/RC4 留 TODO）。
+//    /api/send 发信前用收件人对称密钥加密（自研 AES-256-CBC / ChaCha20），
+//    收信解析时按密文魔数头自动识别并解密（见 MailCrypto.h 与 decodeMail）。
 // ============================================================================
 #ifndef HTTP_SERVER_H
 #define HTTP_SERVER_H
