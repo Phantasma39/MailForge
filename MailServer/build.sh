@@ -20,15 +20,21 @@ cd "$(dirname "$0")"
 #   -pthread               链接多线程库（代码里用了 std::thread）
 #   -Wall -Wextra          打开编译器警告，帮你发现潜在问题
 #   -o mail_server         指定输出文件名为 mail_server
+#   -I include -I ..       头文件路径：include/（MailServer 自身）+ 仓库根（crypto/ common/）
+#   -lssl -lcrypto         数字信封依赖 OpenSSL（crypto-project 子系统使用 OpenSSL 3.0 EVP API）
 #   main.cpp src/...       要编译的源文件
-#   -I include             告诉编译器头文件在 include/ 目录
+#   ../crypto ../common    加密子系统（contrib/crypto-project 合并进来）的源码
 g++ -std=c++17 -pthread -Wall -Wextra \
     -o mail_server \
     main.cpp \
     src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp \
     src/SmtpClient.cpp src/Pop3Client.cpp src/MailCrypto.cpp \
     src/HttpServer.cpp \
-    -I include
+    ../crypto/openssl_util.cpp ../crypto/aes.cpp ../crypto/rsa.cpp \
+    ../crypto/envelope.cpp \
+    ../common/base64.cpp ../common/logger.cpp ../common/file_util.cpp \
+    -I include -I .. \
+    -lssl -lcrypto
 
 # 检查 g++ 是否成功（$? 是上一条命令的退出码），失败就停下来，别往下跑了
 if [ $? -ne 0 ]; then

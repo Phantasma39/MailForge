@@ -51,7 +51,7 @@
   收件人:<input id="inTo" placeholder="如 alice@example.com" style="width:60%"><br>
   主题  :<input id="inSubject" style="width:60%"><br>
   正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
-  <label><input type="checkbox" id="inEncrypt"> 发送时加密（XOR 通道）</label><br>
+  <label><input type="checkbox" id="inEncrypt"> 发送时加密（数字信封 AES-256 + RSA-2048）</label><br>
   附件:<input type="file" id="inFile" onchange="onFilePick()">
   <span id="fileInfo"></span><br>
   <button onclick="doSend()">发送</button>

@@ -3,9 +3,12 @@
 > 计算机与网络课程设计 —— 邮件协议实现及应用系统研制
 > 选题序号 **18** ｜ 难度系数 **1.0**
 
-**MailForge** 是一个用 **C/C++ 从零编写**的邮件服务器，**不依赖任何第三方库**：
-基于原生 **Socket 编程**实现了 **SMTP（RFC 5321）发送**与 **POP3（RFC 1939）收取**两大标准协议，
+**MailForge** 是一个用 **C/C++ 从零编写**的邮件服务器：SMTP / POP3 协议层
+基于原生 **Socket 编程**手写（**不依赖 libcurl/VMime 等现成协议库**），
+实现 **SMTP（RFC 5321）发送**与 **POP3（RFC 1939）收取**两大标准协议，
 并支持**多用户邮箱隔离**（每个用户一个独立收件目录，邮件以标准 `.eml` 格式落盘，服务器重启不丢失）。
+邮件正文加密采用**数字信封（AES-256-CBC + RSA-2048，OpenSSL 3.0 EVP API）**，
+与协议层解耦：服务器收发对密文透明，实现端到端加密。
 
 > 本文档依据仓库里**当前实际存在的代码**编写，逐文件、逐函数、逐结构体地说明
 > 「输入参数 / 返回值 / 作用 / 注意事项」，方便复习、答辩与后续扩展。
@@ -31,7 +34,7 @@
 | 性能压测 | 网页一键连发 100 封 1MB+ 邮件，统计发送成功率/平均时延/**丢包率**，自动清理 | ✅ 已实现 |
 | 邮件附件 | MIME multipart：发信带附件（可与加密叠加）、收件箱📎标记、附件列表、在线下载 | ✅ 已实现 |
 | 协议终端页 | `/demo_smtp.html` `/demo_pop3.html`：像 telnet 一样**自己敲命令一问一答**（需登录） | ✅ 已实现 |
-| 传输加密 | `MailCrypto`：接口已预留；XOR 已可跑通（AES/RC4 留 TODO） | 🟡 部分完成 |
+| 传输加密 | ★ 数字信封（AES-256-CBC + RSA-2048 混合加密）已接入收发链路：加密发送 / 自动解密 / 签名验签；XOR 兼容历史邮件 | ✅ 已实现 |
 
 ## 2. 端口约定
 
@@ -76,7 +79,7 @@
   子类（SMTP / POP3 / HTTP）只需重写纯虚函数 `handleClient()`。
 - **同一个存储**：SMTP 投递、POP3 读取、Web 收发全部围绕 `./mailbox/<用户名>/`，天然一致。
 - **浏览器不直接说邮件协议**：浏览器 → HTTP(8080) → HttpServer 内部用 `SmtpClient`/`Pop3Client`
-  转成 SMTP/POP3 命令 → 完成收发；加密钩子挂在 HttpServer 的发信/收信路径上（见 MailCrypto）。
+  转成 SMTP/POP3 命令 → 完成收发；端到端加密（数字信封）钩子挂在 HttpServer 的发信/收信路径上（见 MailCrypto）。
 
 ## 4. 目录结构（按实际代码）
 
@@ -91,7 +94,7 @@ MailForge/
 │   │   ├── SmtpClient.h           # SMTP 客户端类（主动发信）
 │   │   ├── Pop3Client.h           # POP3 客户端类（主动收信）+ Pop3MailInfo 结构体
 │   │   ├── HttpServer.h           # HTTP 服务器类（REST 接口 + 静态页）
-│   │   └── MailCrypto.h           # 加密模块（接口预留，XOR 已实现）
+│   │   └── MailCrypto.h           # 加密模块（统一入口：数字信封 + XOR 兼容）
 │   ├── src/
 │   │   ├── Server.cpp             # Server 基类实现
 │   │   ├── SmtpServer.cpp         # SMTP 协议实现（状态机 + 落盘）
@@ -99,7 +102,7 @@ MailForge/
 │   │   ├── SmtpClient.cpp         # SMTP 客户端实现（sendMail / sendRawMail）
 │   │   ├── Pop3Client.cpp         # POP3 客户端实现（login/stat/list/retr/dele/quit）
 │   │   ├── HttpServer.cpp         # HTTP 解析 + REST 路由 + 静态页 + 加密钩子
-│   │   └── MailCrypto.cpp         # 加密实现（Base64 + XOR，AES/RC4 留 TODO）
+│   │   └── MailCrypto.cpp         # 加密实现（对接 crypto/ 数字信封 + Base64/XOR）
 │   ├── web/
 │   │   └── index.html             # Web 演示页（登录/写邮件/收件箱/读信/删信）
 │   ├── client_test.cpp            # SMTP/POP3 客户端 演示 + 自测程序
@@ -108,10 +111,14 @@ MailForge/
 │   ├── Makefile                   # make 构建脚本（需先安装 make，可选）
 │   ├── mail_client_test           # 客户端演示程序编译产物
 │   ├── users.txt                  # POP3 账号表（默认 bob/alice，密码 123456）
+│   ├── keys/                      # RSA 密钥目录（登录时自动生成：<用户名>.key.pem / .pub.pem）
 │   ├── mailbox/                   # 邮件存储根目录（运行时自动创建）
 │   │   └── bob/                   # bob 的收件目录（内含 2 封测试邮件 *.eml）
 │   ├── mail_server                # 编译产物（当前主线可执行文件）
 │   └── smtp_server                # 旧编译产物（早期单独编译的 SMTP 程序）
+├── crypto/                        # ★ 加密子系统（contrib/crypto-project 合并进来）
+│   └── aes / rsa / envelope       # AES-256-CBC、RSA-2048、数字信封（mail:: 命名空间，OpenSSL）
+├── common/                        # 加密子系统公共库（base64 / logger / file_util / socket）
 ├── 连接测试/                      # 里程碑 1 的练手代码（HTTP 连通性测试服务器）
 │   ├── server.cpp  utils.h  utils.cpp
 │   └── server                     # 编译产物
@@ -129,12 +136,15 @@ MailForge/
 
 ```bash
 cd /home/phantasma/MailForge/MailServer
-bash build.sh                # 推荐：一键编译（含服务器 + Web 后端）
+bash build.sh                # 推荐：一键编译（含服务器 + Web 后端 + 加密子系统）
 # 或者手动 g++（等价）：
 # g++ -std=c++17 -pthread -o mail_server main.cpp \
 #     src/Server.cpp src/SmtpServer.cpp src/Pop3Server.cpp \
 #     src/SmtpClient.cpp src/Pop3Client.cpp src/MailCrypto.cpp \
-#     src/HttpServer.cpp -I include
+#     src/HttpServer.cpp \
+#     ../crypto/openssl_util.cpp ../crypto/aes.cpp ../crypto/rsa.cpp ../crypto/envelope.cpp \
+#     ../common/base64.cpp ../common/logger.cpp ../common/file_util.cpp \
+#     -I include -I .. -lssl -lcrypto
 ```
 
 ### 5.2 运行
@@ -770,8 +780,9 @@ mailbox/
 ### 12.4 `requirements.md` —— 课程需求文档
 
 原始课程需求（SMTP/POP3 收发、加密、性能指标等），与当前代码的**对照状态**：
-协议收发、多用户邮箱、HTTP 接口与 Web 演示页已完成；加密已具备接口 + XOR 可跑，
-AES/RC4 补全与正式前端属后续里程碑。
+协议收发、多用户邮箱、HTTP 接口、Web 演示页、性能压测已完成；
+加密（AES-256-CBC + RSA-2048 数字信封，来自合并的 crypto-project）已接入收发流程，
+Web 端 encrypt=1 加密发送、收取端按账号私钥自动解密与验签，端到端闭环已验证。
 
 ---
 
@@ -807,8 +818,12 @@ AES/RC4 补全与正式前端属后续里程碑。
 **压力测试（附件版）**：一次性连发 100 封带 ~1MB 附件(multipart)的邮件实测 —— 发送成功 100/100、实际收到 100/100、**丢包率 0%**、单封约 1.08MB、平均单封 ~40ms、全程 ~6s，测试邮件自动清理、收件箱还原。
 
 **HTTP 层接口测试（14 项全部通过）**：静态首页、错误密码拒绝、token 会话、
-明文发送、**加密发送（XOR）**、收件箱带主题列表、加密邮件标记与**自动解密显示**、
-明文/加密删除、无效 token 拒绝等。
+明文发送、**加密发送（AES-256-CBC + RSA-2048 数字信封）**、收件箱带主题列表、
+加密邮件标记与**自动解密显示**、明文/加密删除、无效 token 拒绝等。
+
+**加密端到端实测**：alice 加密发信给 bob（含中文主题/正文与 multipart 附件）→
+落盘 `.eml` 正文为 ASCII 信封（已确认**主题、正文、附件明文均未落盘**）→
+bob POP3 收取自动拆封还原主题与正文 → 附件下载字节与发送完全一致；明文通道不受影响。
 
 复测命令：
 
@@ -863,7 +878,8 @@ Linux 上 25/110 是特权端口，需要 root；且常被运营商/防火墙拦
 - [x] 多用户独立邮箱目录、EML 落盘持久化
 - [x] SMTP 客户端 + POP3 客户端（C++，供 Web 后端调用）
 - [x] C++ HTTP 服务器 + REST 接口 + Web 演示页（`web/index.html`）
-- [ ] 加密算法补全：接口与 XOR 已可跑，待补 RC4 / AES-CBC（满足 ≥2 算法要求）
+- [x] 加密算法补全：AES-256-CBC + RSA-2048 数字信封已接入收发流程（crypto-project 子系统，
+      满足"≥2 种算法协同"要求）；XOR 保留用于兼容历史邮件
 - [ ] 前端美化 / 用户注册功能（可选加分项）
 - [ ] 性能压测：100 次收发成功率 ≥ 99%
 
@@ -1021,11 +1037,14 @@ bash build_client.sh         # ② 编译客户端演示程序
 | `makeSession` / `randomToken` / `loginAndGetSession` | — | — | 会话增查删 |
 | `jsonEscape` / `jsonResult` | — | — | 生成 JSON 字符串 |
 
-**文件内（匿名命名空间）还有两个加密配套工具：**
+**文件内（匿名命名空间）还有加密配套工具：**
 - `struct DecodedMail{encrypted, from, subject, display}` —— 解码结果。
-- `DecodedMail decodeMail(raw)` —— 把 .eml 切头部/正文：明文直接展示；正文带
-  `MailForge::ENC::XOR::` 签名头则调用 `MailCrypto::decryptPayload` 还原出主题+正文，
-  并**保留原始头部（Date/To 等）**，仅把占位的 Subject 替换为解密后的真实主题。
+- `restoreFromPayload(dm, plain, headerPart)` —— 用解密出的主题+正文重建展示文本。
+- `DecodedMail decodeMail(raw, viewerUser)` —— 把 .eml 切头部/正文：
+  明文直接展示；正文是 ASCII 数字信封时用 `viewerUser`（当前收件人）的私钥拆封
+  （`MailCrypto::decryptEnvelope`，AES-256-CBC + RSA-2048，发送方公钥存在则自动验签）；
+  历史 XOR 邮件走 `decryptPayload` 兼容还原。展示时**保留原始头部（Date/To 等）**，
+  仅把占位的 Subject 替换为解密后的真实主题。
 
 **附件相关（同文件内匿名命名空间工具）：**
 - `makeMultipartText(boundary, textBody, filename, fileB64)`：生成 multipart/mixed 正文区（文本段 + base64 附件段）。
@@ -1054,44 +1073,65 @@ bash build_client.sh         # ② 编译客户端演示程序
 
 ## 19. 代码详解 —— 加密模块（`MailServer/include/MailCrypto.h` + `src/MailCrypto.cpp`）
 
-> 这是"传输加密"的**统一入口 / 预留接口**。目前 XOR 完整可跑，AES / RC4 在源码里留有
-> 【TODO】分支位。加新算法时不用改动 HTTP 层，只动这个模块。
+> 这是"端到端邮件加密"的**统一入口**。**主通道是数字信封（AES-256-CBC + RSA-2048）**：
+> 算法实现来自合并进来的 crypto-project 子系统（`crypto/`、`common/`，`mail::` 命名空间，
+> 见文末附录），`MailCrypto` 负责把它与 MailServer 的 SMTP/POP3/HTTP 收发链路对接；
+> XOR 通道保留，用于兼容历史上用 XOR 发出的旧邮件。
 
 ### 19.1 命名空间与枚举
 
 | 条目 | 说明 |
 |---|---|
-| `enum CryptoAlgo { ALGO_NONE, ALGO_XOR, ALGO_RC4, ALGO_AES_CBC }` | 支持算法清单；后两个待实现 |
-| `const char* kEncMagicXor` | 加密签名头：`"MailForge::ENC::XOR::"`，解密靠它识别 |
+| `enum CryptoAlgo { ALGO_NONE, ALGO_XOR, ALGO_RC4, ALGO_AES_CBC, ALGO_ENVELOPE }` | 算法清单；`ALGO_ENVELOPE`（数字信封）为主通道；XOR 兼容旧邮件；RC4 / AES_CBC 为预留位 |
+| `const char* kEncMagicXor` | 旧 XOR 通道签名头：`"MailForge::ENC::XOR::"`（仅解密历史邮件用） |
 
 ### 19.2 函数说明
 
 | 函数 | 输入参数 | 返回值 | 作用 |
 |---|---|---|---|
-| `encryptPayload(plain, key, algo)` | 明文；对称密钥；算法（默认 NONE） | 加密结果字符串 | NONE 原样返回；XOR 返回 `签名头 + Base64(XOR(明文))`；其余算法走默认明文兜底（【TODO】） |
-| `decryptPayload(cipher, key)` | 可能加密过的文本；密钥 | 解密明文 | 无签名头则原样返回；有则 Base64 解码 → XOR 还原 |
-| `base64Encode(data)` | 二进制/文本 | Base64 文本 | 每 76 字符插入 `\r\n`，避免超 SMTP 单行限制 |
-| `base64Decode(text)` | Base64 文本 | 解码字节串 | **忽略**换行/空格，遇 `=`（填充）停止 |
-| `xorCipher(data, key)` | 数据；密钥 | 异或结果 | 逐字节与循环密钥异或；空密钥则原样返回 |
+| `ensureUserKeyPair(user, keyDir)` | 用户名/邮箱；密钥目录(默认 ./keys) | bool | 确保账号的 RSA-2048 密钥对存在，不存在自动生成（POP3 登录成功时调用） |
+| `encryptEnvelope(plain, from, to, out, keyDir)` | 明文载荷；发件人；收件人 | bool / ASCII 信封文本 | ★ 数字信封加密：AES-256-CBC 加密正文 → RSA-2048 加密会话密钥 → 发件人私钥签名 |
+| `decryptEnvelope(envText, viewerKey, out, keyDir)` | 信封文本；收件人 | bool / 明文 | ★ 用收件人私钥拆封；发送方公钥在本地存在则自动验签 |
+| `isEnvelopeText(text)` | 任意文本 | bool | 是否 `-----BEGIN MAIL ENVELOPE-----` 格式的 ASCII 信封 |
+| `encryptPayload / decryptPayload` | 明文/密文；对称密钥 | 字符串 | 旧 XOR 对称通道（Base64 + XOR），仅用于兼容历史邮件 |
+| `base64Encode / base64Decode` | 数据 | 文本/字节串 | Base64 编解码（每 76 字符插入换行；解码忽略换行/空格） |
+| `xorCipher(data, key)` | 数据；密钥 | 异或结果 | 逐字节循环异或；空密钥则原样返回 |
 
 ### 19.3 加密后的"落地格式"
 
-```
-Subject: [加密邮件]            ← 头部主题占位（明文，收件箱可显示）
-（空行）
-MailForge::ENC::XOR::xxxxxxxx  ← 正文 = 签名头 + Base64(异或密文)
-yyyyyyyy…（每 76 字符换行）
+```text
+Date: ...                          ← 服务器补的标准头（明文，便于路由/显示）
+From: alice@example.com
+To: bob@example.com
+Subject: [加密邮件]                 ← 占位主题（收件箱可显示，真实主题在信封内）
+X-MailForge-Crypto: envelope        ← 加密方式标记（便于识别/调试）
+
+-----BEGIN MAIL ENVELOPE-----       ← 正文 = ASCII 数字信封
+Version: 1.0
+Cipher: AES-256-CBC
+From: alice@example.com             ← 信封内明文路由头（仅发/收件人地址）
+To: bob@example.com
+EncKey: <Base64：RSA-2048 加密后的 AES 会话密钥>
+IV: <Base64：AES 初始化向量>
+Signature: <Base64：发件人私钥对密文的 SHA-256 签名>
+Body: <Base64：AES-256-CBC 密文，每 76 字符换行>
+-----END MAIL ENVELOPE-----
 ```
 
-加密前把「真实主题 + 真实正文」打包成载荷 `Subject: 真实主题\r\n\r\n真实正文`，
-收件方读取时 `decodeMail()` 自动解密并还原成可读邮件（`encrypted=true` 会标记）。
+加密前把「真实主题 + 真实正文（含附件 multipart）」打包成载荷
+`Subject: 真实主题\r\n\r\n真实正文`，用**收件人（bob）的公钥**封进信封；
+服务器落盘与 POP3 传输全程只看到上面的 ASCII 信封，看不到任何明文。
+收件方读取时 `decodeMail(raw, viewerUser)` 用 **bob 的私钥**拆封、
+**alice 的公钥**验签，自动还原成可读邮件（列表与阅读接口都带 `encrypted=true` 标记）。
 
 ### 19.4 密钥 / 算法在哪配置
 
-- 密钥与算法常量在 `HttpServer.cpp` 顶部的匿名命名空间：
-  `kCryptoKey`（默认 `"MailForge-Course-Key-2026"`）、`kCryptoAlgo`（默认 XOR）。
-- 收发共用同一把密钥；以后做密钥管理时改成从配置文件读取即可。
-- 调用方通过 `/api/send` 的 `encrypt=1` 参数开启加密通道（`web/index.html` 里有勾选框演示）。
+- 每个用户一对 RSA-2048 密钥：`./keys/<用户名>.key.pem`（私钥）与
+  `./keys/<用户名>.pub.pem`（公钥）；用户在 **POP3 登录成功时**由
+  `MailCrypto::ensureUserKeyPair()` 自动生成，无需手工准备
+  （`keys/` 与 `*.pem` 已在 `.gitignore` 中忽略，勿提交）。
+- `HttpServer.cpp` 顶部保留了 `kCryptoKey`，仅用于解密历史 XOR 邮件。
+- 调用方通过 `/api/send` 的 `encrypt=1` 参数开启加密通道（`web/index.html` 勾选框演示）。
 
 ---
 
@@ -1167,8 +1207,12 @@ yyyyyyyy…（每 76 字符换行）
       - [x] 可视化测试工具（tests/demo_visual.cpp）—— 密钥指纹/明密文对比/篡改演示/性能基准
       - [x] 命令行接口（tools/crypto_cli.cpp）—— 加密模块 CLI，供 GUI/脚本/集成调用
       - [x] tkinter 图形界面（tools/mail_crypto_gui.py）—— 生成密钥/加密/解密/篡改/性能 一键演示
-- [ ] Step 5: 数字信封集成 → 加密发送 / 解密接收
-- [ ] Step 6: 多线程服务器 + 100 次压力测试（性能验收）
+- [x] Step 5: 数字信封集成 → 加密发送 / 解密接收（2026-09-07 已与 MailForge 主项目对接：
+      登录自动生成用户 RSA 密钥；HTTP 链路 encrypt=1 走数字信封（AES-256-CBC + RSA-2048）；
+      收取端按账号私钥自动拆封并验签。对接代码见 MailServer/include/MailCrypto.h、
+      src/MailCrypto.cpp 与 src/HttpServer.cpp 的 decodeMail/handleSend，端到端闭环已验证）
+- [x] Step 6: 多线程服务器 + 100 次压力测试（MailForge MailServer 已多线程化，
+      并提供 GET /api/benchmark 一键 100 封 1MB+ 附件压测：成功率 100%、丢包率 0%）
 - [ ] Step 7: 打磨收尾（异常处理 / 日志 / 演示 / 答辩要点）
 
 ## 五、构建方式（WSL2 / Linux）

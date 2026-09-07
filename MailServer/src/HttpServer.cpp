@@ -27,12 +27,12 @@ const int   kSmtpPort     = 2525;    // 本机 MailServer 的 SMTP 端口
 const int   kPop3Port     = 1110;    // 本机 MailServer 的 POP3 端口
 const int   kRecvTimeoutSec = 10;    // HTTP 请求读取超时（秒）
 
-// ===================== 加密相关配置（预留接口） =====================
-// 密钥：收发双方必须一致。以后做密钥管理时，可以改成从配置文件读。
+// ===================== 加密相关配置 =====================
+// XOR 对称密钥：仅用于解密历史版本用 XOR 通道发出的旧邮件（向后兼容读取）。
 const std::string kCryptoKey = "MailForge-Course-Key-2026";
-// 发信时用哪种算法（encrypt=1 时生效）。
-// 目前 XOR 已实现可跑；AES/RC4 见 MailCrypto.h 里的【TODO】
-const MailCrypto::CryptoAlgo kCryptoAlgo = MailCrypto::ALGO_XOR;
+// ★ 当前加密通道：数字信封（AES-256-CBC + RSA-2048），见 MailCrypto.h 的
+//   encryptEnvelope / decryptEnvelope。每个用户一对 RSA 密钥，保存在 ./keys/ 下
+//  （keys/<用户名>.key.pem 私钥 / keys/<用户名>.pub.pem 公钥），登录时自动生成。
 
 // 一封邮件解码后的结果（无论明文还是密文，统一成可展示的形态）
 struct DecodedMail {
@@ -42,12 +42,63 @@ struct DecodedMail {
     std::string display;      // 展示用完整文本（加密邮件已还原成明文）
 };
 
-// 把一封 POP3 拉回来的原始 .eml 解码：
-//   明文邮件 → 原样展示；
-//   加密邮件 → 正文带 MailForge::ENC::XOR:: 签名头 → 用密钥解密"正文载荷"，
-//             载荷里还原出主题与正文，重新拼成可读邮件。
-// 【TODO】换 AES/RC4 后只需在 MailCrypto::decryptPayload 里加分支，这里不动。
-DecodedMail decodeMail(const std::string& raw) {
+// 把"解密后载荷"合并进展示结果。载荷格式（发送端约定）：
+//   "Subject: 真实主题\r\n\r\n正文区..."
+// 保留原 .eml 头部区的 Date/To/From 等字段，仅去掉占位 Subject 与加密标记行，
+// 再把主题替换为解密出的真实主题、正文替换为解出的正文。
+void restoreFromPayload(DecodedMail& dm, const std::string& plain,
+                        const std::string& headerPart) {
+    const std::string sepCRLF = "\r\n\r\n";
+    const std::string sepLF   = "\n\n";
+
+    std::string loadSubject = HttpServer::parseHeader(plain, "Subject");
+    std::string loadBody    = plain;
+    size_t ls = plain.find(sepCRLF);
+    if (ls != std::string::npos) loadBody = plain.substr(ls + sepCRLF.size());
+    else {
+        ls = plain.find(sepLF);
+        if (ls != std::string::npos) loadBody = plain.substr(ls + sepLF.size());
+    }
+    dm.subject = loadSubject.empty() ? "(加密邮件)" : loadSubject;
+
+    // 字段名大小写不敏感比较（RFC 5322：字段名不区分大小写）
+    auto fieldNameIs = [](const std::string& line, const std::string& name) {
+        if (line.size() <= name.size() || line[name.size()] != ':') return false;
+        for (size_t i = 0; i < name.size(); ++i) {
+            if (tolower((unsigned char)line[i]) != tolower((unsigned char)name[i])) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // 重建头部：保留原样，去掉占位 Subject 与本系统加密标记行
+    std::string newHeader;
+    {
+        std::istringstream iss(headerPart);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            if (fieldNameIs(line, "Subject")) continue;              // 去掉占位 Subject
+            if (fieldNameIs(line, "X-MailForge-Crypto")) continue;   // 去掉加密标记
+            newHeader += line + "\r\n";
+        }
+    }
+
+    dm.display = newHeader
+               + "Subject: " + dm.subject + "\r\n"    // 换成解密后的真实主题
+               + "\r\n" + loadBody;
+}
+
+// 把一封 POP3 拉回来的原始 .eml 解码成可展示形态。
+// viewerUser 是"正在查看邮件的收件人"（数字信封邮件用它自己的私钥拆封）。
+// 支持三种形态：
+//   1) 明文邮件        → 原样展示；
+//   2) XOR 邮件(历史)  → 正文带 MailForge::ENC::XOR:: 签名头 → decryptPayload 还原；
+//   3) 数字信封邮件    → 正文是 -----BEGIN MAIL ENVELOPE----- 的 ASCII 信封
+//                        （AES-256-CBC + RSA-2048，由 MailCrypto 拆封并自动验签）。
+DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
     DecodedMail dm;
     dm.from = HttpServer::parseHeader(raw, "From");
 
@@ -68,61 +119,35 @@ DecodedMail decodeMail(const std::string& raw) {
         }
     }
 
-    // 2) 判断正文是不是加密的（带签名头）
-    const std::string magic(MailCrypto::kEncMagicXor);
-    bool isCipher = bodyPart.compare(0, magic.size(), magic) == 0;
-
-    if (!isCipher) {
-        // ---- 明文邮件：原样展示 ----
-        dm.display  = raw;
-        dm.subject  = HttpServer::parseHeader(raw, "Subject");
-        if (dm.subject.empty()) dm.subject = "(无主题)";
+    // 2) ★ 数字信封邮件：正文区直接就是 ASCII 信封文本
+    if (MailCrypto::isEnvelopeText(bodyPart)) {
+        dm.encrypted = true;
+        std::string plain;
+        if (MailCrypto::decryptEnvelope(bodyPart, viewerUser, plain)) {
+            restoreFromPayload(dm, plain, headerPart);
+        } else {
+            // 拆封失败：密钥未初始化 / 收件人不匹配 / 密文被篡改等情况
+            dm.subject = "(加密邮件，无法解密)";
+            dm.display = headerPart + "\r\n\r\n" + bodyPart;   // 原文保留可导出
+            std::cerr << "[HTTP] 数字信封邮件无法解密（收件人视角: "
+                      << viewerUser << "）" << std::endl;
+        }
         return dm;
     }
 
-    // ---- 加密邮件：解密正文载荷，还原出 Subject 与正文 ----
-    dm.encrypted = true;
-    std::string plain = MailCrypto::decryptPayload(bodyPart, kCryptoKey);
-
-    // 载荷格式是我们发送时约定的："Subject: xxx\r\n\r\n正文..."
-    std::string loadSubject = HttpServer::parseHeader(plain, "Subject");
-    std::string loadBody    = plain;
-    size_t ls = plain.find(sepCRLF);
-    if (ls != std::string::npos) loadBody = plain.substr(ls + sepCRLF.size());
-    else {
-        ls = plain.find(sepLF);
-        if (ls != std::string::npos) loadBody = plain.substr(ls + sepLF.size());
+    // 3) 兼容历史 XOR 通道邮件：正文带 MailForge::ENC::XOR:: 签名头
+    const std::string magic(MailCrypto::kEncMagicXor);
+    if (bodyPart.compare(0, magic.size(), magic) == 0) {
+        dm.encrypted = true;
+        restoreFromPayload(dm, MailCrypto::decryptPayload(bodyPart, kCryptoKey),
+                           headerPart);
+        return dm;
     }
 
-    dm.subject = loadSubject.empty() ? "(加密邮件)" : loadSubject;
-
-    // ---- 重建展示文本：保留原头部区的 Date/To 等所有字段 ----
-    // 之前这里只拼了 From + Subject，导致加密邮件阅读时看不到 Date/To；
-    // 现在改为：原样保留头部每一行，仅把占位的 Subject 换成解密后的真实主题。
-    auto isSubjectHeader = [](const std::string& line) {
-        const std::string key = "Subject";
-        if (line.size() <= key.size() || line[key.size()] != ':') return false;
-        for (size_t i = 0; i < key.size(); ++i) {
-            if (tolower((unsigned char)line[i]) != tolower((unsigned char)key[i])) return false;
-        }
-        return true;
-    };
-
-    std::string newHeader;
-    {
-        std::istringstream iss(headerPart);
-        std::string line;
-        while (std::getline(iss, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
-            if (isSubjectHeader(line)) continue;   // 去掉占位的 Subject: [加密邮件]
-            newHeader += line + "\r\n";
-        }
-    }
-
-    dm.display = newHeader
-               + "Subject: " + dm.subject + "\r\n"    // 换成解密后的真实主题
-               + "\r\n" + loadBody;
+    // 4) 明文邮件：原样展示
+    dm.display = raw;
+    dm.subject = HttpServer::parseHeader(raw, "Subject");
+    if (dm.subject.empty()) dm.subject = "(无主题)";
     return dm;
 }
 } // namespace
@@ -885,16 +910,27 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
 
     // ---- 拼一封标准邮件原文（头部区 + 空行 + 正文）----
     std::string mailSubject = subject;
+    std::string cryptoHeader;   // 加密时额外写进头部区的标记行（便于识别/调试）
     if (wantEncrypt) {
         // ===================== 加密挂钩点①（发送前） =====================
-        // 加密时把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷加密；
-        // 头部只留 Subject: [加密邮件] 占位（信封 From/To 必须明文才能投递）。
-        // 读取端 decodeMail() 会解密还原主题与 multipart 正文，附件照常可下载。
-        // 【TODO】换 AES/RC4：改 MailCrypto::encryptPayload 分支即可，这里不动。
+        // 把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷，
+        // 交给 MailCrypto::encryptEnvelope() 做数字信封：
+        //   AES-256-CBC 加密正文 → RSA-2048 加密会话密钥 → 发件人私钥签名。
+        // 输出的 ASCII 信封文本可直接进 SMTP DATA，服务器只落盘看不到明文；
+        // 头部只留 Subject: [加密邮件] 占位与 X-MailForge-Crypto 标记。
+        // 读取端 decodeMail() 用收件人私钥拆封，还原主题与 multipart 正文，
+        // 附件照常可下载（信封内仍是一份标准 multipart 邮件）。
         mailSubject = "[加密邮件]";
         std::string envelope = "Subject: " + subject + "\r\n\r\n" + payload;
-        payload = MailCrypto::encryptPayload(envelope, kCryptoKey, kCryptoAlgo) + "\r\n";
-        mimeHeaders.clear();   // 密文不再是 multipart，不能挂 MIME 头
+        std::string envText;
+        if (!MailCrypto::encryptEnvelope(envelope, from, to, envText)) {
+            resp.body = jsonResult(false,
+                "加密失败：无法生成/加载发件人或收件人的 RSA 密钥，请检查 keys/ 目录");
+            return;
+        }
+        payload = envText + "\r\n";
+        mimeHeaders.clear();                          // 密文不再是 multipart，不挂 MIME 头
+        cryptoHeader = "X-MailForge-Crypto: envelope\r\n";
     }
 
     std::string plain =
@@ -902,6 +938,7 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
         "To: " + to + "\r\n"
         "Subject: " + mailSubject + "\r\n"
         + mimeHeaders
+        + cryptoHeader
         + "\r\n" + payload;
 
     SmtpClient smtp(kMailServerIp, kSmtpPort);
@@ -946,8 +983,9 @@ void HttpServer::handleInbox(const HttpRequest& req, HttpResponse& resp) {
         if (!pop3.retr(mails[i].number, raw)) continue;
 
         // ===================== 加密挂钩点②（收取后解密） =====================
-        // decodeMail 会自动识别"正文加密"的邮件并还原主题/正文（见匿名命名空间实现）
-        DecodedMail decoded = decodeMail(raw);
+        // decodeMail 会自动识别信封/XOR 加密邮件，并用收件人（session.user）的
+        // 私钥拆封还原主题/正文（见匿名命名空间实现）
+        DecodedMail decoded = decodeMail(raw, session.user);
         std::string subject = decoded.subject;
         std::string from    = decoded.from;
         bool encrypted      = decoded.encrypted;
@@ -999,7 +1037,7 @@ void HttpServer::handleMail(const HttpRequest& req, HttpResponse& resp) {
     pop3.quit();
 
     // ===================== 加密挂钩点③（读单封时解密） =====================
-    DecodedMail decoded = decodeMail(raw);
+    DecodedMail decoded = decodeMail(raw, session.user);
 
     // 顺带解析附件列表（multipart 里的 Content-Disposition: attachment 段）
     std::vector<MimeAttachment> atts;
@@ -1048,7 +1086,7 @@ void HttpServer::handleAttachment(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    DecodedMail decoded = decodeMail(raw);
+    DecodedMail decoded = decodeMail(raw, session.user);
     std::vector<MimeAttachment> atts;
     parseAttachments(decoded.display, atts);
     if (index >= (int)atts.size()) {
