@@ -38,3 +38,8 @@ Thumbs.db
 #测试
 test.cpp
 .eml
+# ---- 合并自 contrib/crypto-project（邮件加密子系统） ----
+keys/
+*.pem
+__pycache__/
+*.pyc
