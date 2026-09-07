@@ -1,7 +1,8 @@
-# 课程原始 PDF（已提取为 md 文档）
-课程要求/
+# ============================================================================
+#  MailForge .gitignore
+# ============================================================================
 
-# 构建产物
+# ---- 构建产物（make 生成，勿提交） ----
 *.o
 *.obj
 *.a
@@ -10,36 +11,37 @@
 *.exe
 *.out
 *.exe~
-MailForge
-src/server
 build/
 Debug/
 Release/
 bin/
 obj/
+mail_server
+mail_client_test
+smtp_server
+bridge
 
-# 运行时数据
+# ---- 运行时数据（启动服务器后自动生成） ----
+mailbox/
+keys/
 data/
+*.pem
+*.eml
 
-# IDE
+# ---- 日志 / Python ----
+*.log
+__pycache__/
+*.pyc
+
+# ---- IDE / 系统 ----
 .vscode/
 .idea/
 *.suo
 *.user
 CMakeLists.txt.user
-
-# 系统文件
 Thumbs.db
 .DS_Store
 
-# 日志
-*.log
-
-#测试
-test.cpp
-.eml
-# ---- 合并自 contrib/crypto-project（邮件加密子系统） ----
-keys/
-*.pem
-__pycache__/
-*.pyc
+# ---- 其他 ----
+课程要求/
+src/server

@@ -1,100 +1,111 @@
-# Makefile —— 邮件加密系统构建脚本
-# 使用方式（MSYS2 bash / WSL / Linux）：
-#   make            # 编译全部（主程序 + 测试）
-#   make test       # 运行全部自测
-#   make test-base64 / test-logger / test-crypto
-#   make stress     # 100 次压力测试（Step 6 后可用）
-#   make clean
+# ============================================================================
+#  MailForge 统一构建脚本（根目录）
 #
-# Windows 注意：请在 MSYS2 bash 中运行本 Makefile（中文路径兼容）
+#  常用命令：
+#    make server         编译邮件服务器（含 Web 后端 + 数字信封加密）
+#                        产物：MailServer/mail_server
+#    make run            编译并启动服务器（浏览器打开 http://localhost:8080）
+#    make client         编译 SMTP/POP3 客户端演示    产物：MailServer/mail_client_test
+#    make test-crypto    运行加密子系统自测（crypto/，需要 keys/ 目录，会自动创建）
+#    make demo-crypto    编译并运行加密演示工具（信封演示 / 可视化 / CLI）
+#    make clean          清理全部产物与运行数据
+#
+#  环境要求：g++（C++17）、make、OpenSSL 3.0（libssl-dev / -lssl -lcrypto）
+#  说明：服务器主体用 Linux/POSIX socket API；加密子系统的自测可跨平台
+#        （MSYS2/Windows 下会自动链接 Winsock）。
+# ============================================================================
 
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -g -I. \
-            -finput-charset=UTF-8 -fexec-charset=UTF-8
-LDLIBS   += -lpthread -lcrypto
-# 平台探测：用编译器预定义宏判断是否原生 Windows(MinGW-w64)，需要链接 Winsock。
-#   不用 uname：其在 MSYS2 下输出随 MSYSTEM 变化，且 WSL 可能继承 Windows 的 OS 变量。
+CXXFLAGS ?= -std=c++17 -pthread -Wall -Wextra -O2 -g -I MailServer/include -I .
+LDLIBS   := -lssl -lcrypto
+
+# 平台探测：原生 Windows（MinGW-w64 / MSYS2）下 crypto 子系统需要 Winsock
 WIN32_PROBE := $(shell echo | $(CXX) -dM -E -x c++ - | grep -c 'define _WIN32 ')
 ifeq ($(WIN32_PROBE),1)
-LDLIBS   += -lws2_32
+LDLIBS += -lws2_32
 endif
 
-COMMON_SRCS = common/base64.cpp common/logger.cpp common/file_util.cpp
-CRYPTO_SRCS = crypto/openssl_util.cpp crypto/aes.cpp crypto/rsa.cpp \
-              crypto/envelope.cpp
-SOCKET_SRCS = common/socket.cpp   # Socket 单独成组，避免旧目标被迫依赖 Winsock
+# ----------------------------------------------------------------------------
+# 邮件服务器（MailServer/ 协议与 HTTP 实现 + crypto/ common/ 加密子系统）
+# ----------------------------------------------------------------------------
+MAIL_SRC = MailServer/main.cpp \
+           MailServer/src/Server.cpp MailServer/src/SmtpServer.cpp \
+           MailServer/src/Pop3Server.cpp MailServer/src/SmtpClient.cpp \
+           MailServer/src/Pop3Client.cpp \
+           MailServer/src/HttpServer.cpp MailServer/src/MailCrypto.cpp
+CRYPTO_SRC = crypto/openssl_util.cpp crypto/aes.cpp crypto/rsa.cpp \
+             crypto/envelope.cpp \
+             common/base64.cpp common/logger.cpp common/file_util.cpp
 
-COMMON_OBJS = $(COMMON_SRCS:.cpp=.o)
-CRYPTO_OBJS = $(CRYPTO_SRCS:.cpp=.o)
-SOCKET_OBJS = $(SOCKET_SRCS:.cpp=.o)
+server: MailServer/mail_server
 
-# ---------- 测试目标 ----------
-TEST_BASE64 = tests/test_base64
-TEST_LOGGER = tests/test_logger
-TEST_CRYPTO = tests/test_crypto
-TEST_SOCKET = tests/test_socket
-TEST_DEMO   = tests/demo_envelope
-TEST_VISUAL = tests/demo_visual
-TEST_CLI    = tools/crypto_cli
+MailServer/mail_server: $(MAIL_SRC) $(CRYPTO_SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $(MAIL_SRC) $(CRYPTO_SRC) $(LDLIBS)
 
-all: $(TEST_BASE64) $(TEST_LOGGER) $(TEST_CRYPTO) $(TEST_SOCKET) $(TEST_DEMO) $(TEST_VISUAL) $(TEST_CLI)
+run: server
+	cd MailServer && ./mail_server
 
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+# ----------------------------------------------------------------------------
+# 客户端演示（client_test.cpp：SMTP 发信 + POP3 收信/删信全流程）
+# ----------------------------------------------------------------------------
+client: MailServer/mail_client_test
 
-$(TEST_BASE64): tests/test_base64.cpp common/base64.o
-	$(CXX) $(CXXFLAGS) $^ -o $@
+MailServer/mail_client_test: MailServer/client_test.cpp \
+                             MailServer/src/SmtpClient.cpp MailServer/src/Pop3Client.cpp
+	$(CXX) $(CXXFLAGS) -o $@ MailServer/client_test.cpp \
+	     MailServer/src/SmtpClient.cpp MailServer/src/Pop3Client.cpp
 
-$(TEST_LOGGER): tests/test_logger.cpp common/logger.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+# ----------------------------------------------------------------------------
+# 加密子系统（crypto/ 目录，mail:: 命名空间）—— 自测与演示工具
+# ----------------------------------------------------------------------------
+C_COMMON = common/base64.cpp common/logger.cpp common/file_util.cpp
+C_CRYPTO = crypto/openssl_util.cpp crypto/aes.cpp crypto/rsa.cpp crypto/envelope.cpp
 
-$(TEST_SOCKET): tests/test_socket.cpp common/socket.o common/logger.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+T_B64  = crypto/tests/test_base64
+T_LOG  = crypto/tests/test_logger
+T_SOCK = crypto/tests/test_socket
+T_CRYP = crypto/tests/test_crypto
+D_DEMO = crypto/tests/demo_envelope
+D_VIS  = crypto/tests/demo_visual
+C_CLI  = crypto/tools/crypto_cli
+CRYPTO_BINS = $(T_B64) $(T_LOG) $(T_SOCK) $(T_CRYP) $(D_DEMO) $(D_VIS) $(C_CLI)
 
-$(TEST_CRYPTO): tests/test_crypto.cpp $(COMMON_OBJS) $(CRYPTO_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+$(T_B64): crypto/tests/test_base64.cpp common/base64.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^
 
-$(TEST_DEMO): tests/demo_envelope.cpp $(COMMON_OBJS) $(CRYPTO_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+$(T_LOG): crypto/tests/test_logger.cpp common/logger.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-$(TEST_VISUAL): tests/demo_visual.cpp $(COMMON_OBJS) $(CRYPTO_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+$(T_SOCK): crypto/tests/test_socket.cpp common/socket.cpp common/logger.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-$(TEST_CLI): tools/crypto_cli.cpp $(COMMON_OBJS) $(CRYPTO_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDLIBS)
+$(T_CRYP): crypto/tests/test_crypto.cpp $(C_COMMON) $(C_CRYPTO)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-# ---------- 运行测试 ----------
-test: test-base64 test-logger test-crypto test-socket
+$(D_DEMO): crypto/tests/demo_envelope.cpp $(C_COMMON) $(C_CRYPTO)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-test-base64: $(TEST_BASE64)
-	./$(TEST_BASE64)
+$(D_VIS): crypto/tests/demo_visual.cpp $(C_COMMON) $(C_CRYPTO)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-test-logger: $(TEST_LOGGER)
-	./$(TEST_LOGGER)
+$(C_CLI): crypto/tools/crypto_cli.cpp $(C_COMMON) $(C_CRYPTO)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
-test-socket: $(TEST_SOCKET)
-	./$(TEST_SOCKET)
+test-crypto: $(T_B64) $(T_LOG) $(T_SOCK) $(T_CRYP)
+	mkdir -p keys
+	./$(T_B64) && ./$(T_LOG) && ./$(T_SOCK) && ./$(T_CRYP)
 
-test-crypto: $(TEST_CRYPTO)
-	./$(TEST_CRYPTO)
+demo-crypto: $(D_DEMO) $(D_VIS) $(C_CLI)
+	./$(D_DEMO)
 
-# ---------- 演示 ----------
-demo: $(TEST_DEMO)
-	./$(TEST_DEMO)
-
-demo-visual: $(TEST_VISUAL)
-	./$(TEST_VISUAL)
-
-cli: $(TEST_CLI)
-
-# ---------- 压力测试（Step 6 完成后启用） ----------
-stress:
-	@echo "压力测试将在 Step 6 接入"
+all: server client test-crypto
 
 clean:
-	rm -f $(TEST_BASE64) $(TEST_LOGGER) $(TEST_CRYPTO) $(TEST_DEMO) $(TEST_VISUAL) $(TEST_CLI)
-	rm -f $(COMMON_OBJS) $(CRYPTO_OBJS) $(SOCKET_OBJS)
-	rm -f keys/*.pem
+	rm -f MailServer/mail_server MailServer/mail_client_test
+	rm -f $(CRYPTO_BINS)
+	rm -f common/*.o crypto/*.o crypto/tests/*.o crypto/tools/*.o
+	rm -rf keys
 
-.PHONY: all test test-base64 test-logger test-crypto test-socket demo demo-visual cli stress clean
+.PHONY: all server run client test-crypto demo-crypto clean
+
 
