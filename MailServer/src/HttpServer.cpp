@@ -93,11 +93,12 @@ void restoreFromPayload(DecodedMail& dm, const std::string& plain,
 
 // 把一封 POP3 拉回来的原始 .eml 解码成可展示形态。
 // viewerUser 是"正在查看邮件的收件人"（数字信封邮件用它自己的私钥拆封）。
-// 支持三种形态：
+// 支持几种形态：
 //   1) 明文邮件        → 原样展示；
-//   2) XOR 邮件(历史)  → 正文带 MailForge::ENC::XOR:: 签名头 → decryptPayload 还原；
-//   3) 数字信封邮件    → 正文是 -----BEGIN MAIL ENVELOPE----- 的 ASCII 信封
-//                        （AES-256-CBC + RSA-2048，由 MailCrypto 拆封并自动验签）。
+//   2) 数字信封邮件    → 正文是 -----BEGIN MAIL ENVELOPE----- 的 ASCII 信封
+//                        （AES-256-CBC + RSA-2048，MailCrypto 拆封并自动验签）；
+//   3) AES 对称邮件    → 正文带 MailForge::ENC::AES:: 签名头 → decryptAesPayload；
+//   4) XOR 邮件(历史)  → 正文带 MailForge::ENC::XOR:: 签名头 → decryptPayload 还原。
 DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
     DecodedMail dm;
     dm.from = HttpServer::parseHeader(raw, "From");
@@ -135,7 +136,22 @@ DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
         return dm;
     }
 
-    // 3) 兼容历史 XOR 通道邮件：正文带 MailForge::ENC::XOR:: 签名头
+    // 3) AES-256-CBC 对称通道邮件：正文带 MailForge::ENC::AES:: 签名头
+    if (MailCrypto::isAesPayload(bodyPart)) {
+        dm.encrypted = true;
+        const std::string plain = MailCrypto::decryptAesPayload(bodyPart);
+        if (!plain.empty()) {
+            restoreFromPayload(dm, plain, headerPart);
+        } else {
+            dm.subject = "(加密邮件，无法解密)";
+            dm.display = headerPart + "\r\n\r\n" + bodyPart;
+            std::cerr << "[HTTP] AES 对称邮件无法解密（密钥不匹配或密文损坏）"
+                      << std::endl;
+        }
+        return dm;
+    }
+
+    // 4) 兼容历史 XOR 通道邮件：正文带 MailForge::ENC::XOR:: 签名头
     const std::string magic(MailCrypto::kEncMagicXor);
     if (bodyPart.compare(0, magic.size(), magic) == 0) {
         dm.encrypted = true;
@@ -144,7 +160,7 @@ DecodedMail decodeMail(const std::string& raw, const std::string& viewerUser) {
         return dm;
     }
 
-    // 4) 明文邮件：原样展示
+    // 5) 明文邮件：原样展示
     dm.display = raw;
     dm.subject = HttpServer::parseHeader(raw, "Subject");
     if (dm.subject.empty()) dm.subject = "(无主题)";
@@ -882,7 +898,12 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     std::string from = getParam(req, "from");
     if (from.empty()) from = session.user + "@example.com";
 
-    bool wantEncrypt = (getParam(req, "encrypt") == "1");
+    // ---- 加密档位：encrypt 参数 ----
+    //   空 / "0" → 明文；"1" → 数字信封（AES-256-CBC + RSA-2048，默认）；
+    //   "2"     → AES-256-CBC 对称通道（第二档可切换算法）
+    std::string encryptMode = getParam(req, "encrypt");
+    if (encryptMode == "0") encryptMode.clear();
+    const bool wantEncrypt = !encryptMode.empty();
 
     // ---- 附件参数（可选）：filename = 文件名，fileB64 = 文件内容的 Base64 ----
     std::string filename = getParam(req, "filename");
@@ -913,24 +934,33 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     std::string cryptoHeader;   // 加密时额外写进头部区的标记行（便于识别/调试）
     if (wantEncrypt) {
         // ===================== 加密挂钩点①（发送前） =====================
-        // 把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷，
-        // 交给 MailCrypto::encryptEnvelope() 做数字信封：
-        //   AES-256-CBC 加密正文 → RSA-2048 加密会话密钥 → 发件人私钥签名。
-        // 输出的 ASCII 信封文本可直接进 SMTP DATA，服务器只落盘看不到明文；
+        // 把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷加密：
+        //   档 1 encrypt=1：数字信封 —— AES-256-CBC 加密正文 → RSA-2048 加密
+        //        会话密钥 → 发件人私钥签名，输出 ASCII 信封文本；
+        //   档 2 encrypt=2：AES-256-CBC 对称通道（内置密钥，第二档可切换算法）。
+        // 服务器落盘/传输只看到密文文本，看不到明文；
         // 头部只留 Subject: [加密邮件] 占位与 X-MailForge-Crypto 标记。
-        // 读取端 decodeMail() 用收件人私钥拆封，还原主题与 multipart 正文，
-        // 附件照常可下载（信封内仍是一份标准 multipart 邮件）。
+        // 读取端 decodeMail() 自动识别并还原主题与 multipart 正文，附件照常可下载。
         mailSubject = "[加密邮件]";
-        std::string envelope = "Subject: " + subject + "\r\n\r\n" + payload;
-        std::string envText;
-        if (!MailCrypto::encryptEnvelope(envelope, from, to, envText)) {
-            resp.body = jsonResult(false,
-                "加密失败：无法生成/加载发件人或收件人的 RSA 密钥，请检查 keys/ 目录");
-            return;
+        const std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
+        std::string bodyText;
+        if (encryptMode == "2") {
+            bodyText = MailCrypto::encryptAesPayload(inner);
+            if (bodyText.empty()) {
+                resp.body = jsonResult(false, "AES 加密失败，请稍后重试");
+                return;
+            }
+            cryptoHeader = "X-MailForge-Crypto: aes\r\n";
+        } else {
+            if (!MailCrypto::encryptEnvelope(inner, from, to, bodyText)) {
+                resp.body = jsonResult(false,
+                    "加密失败：无法生成/加载发件人或收件人的 RSA 密钥，请检查 keys/ 目录");
+                return;
+            }
+            cryptoHeader = "X-MailForge-Crypto: envelope\r\n";
         }
-        payload = envText + "\r\n";
+        payload = bodyText + "\r\n";
         mimeHeaders.clear();                          // 密文不再是 multipart，不挂 MIME 头
-        cryptoHeader = "X-MailForge-Crypto: envelope\r\n";
     }
 
     std::string plain =

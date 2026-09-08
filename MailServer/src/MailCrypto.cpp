@@ -12,11 +12,15 @@
 #include "MailCrypto.h"
 
 #include <sys/stat.h>
+#include <array>
 #include <cctype>
+#include <cstring>
 #include <mutex>
 #include <iostream>
 #include <openssl/pem.h>
+#include <openssl/evp.h>
 
+#include "crypto/aes.hpp"
 #include "crypto/envelope.hpp"
 #include "crypto/rsa.hpp"
 
@@ -106,11 +110,25 @@ bool loadOrCreateKeyPair(const std::string& userKey,
     return true;
 }
 
+// ---- AES-256-CBC 对称通道（第二档可切换算法）的密钥派生 ----
+// 由固定口令 SHA-256 派生 32 字节密钥（无密钥文件、无密钥管理负担）。
+std::array<unsigned char, 32> AesChannelKey() {
+    const char* passphrase = "MailForge-AES-Channel-2026@course";
+    std::array<unsigned char, 32> key{};
+    unsigned int len = 0;
+    if (EVP_Digest(passphrase, std::strlen(passphrase),
+                   key.data(), &len, EVP_sha256(), nullptr) != 1) {
+        std::cerr << "[MailCrypto] AES 通道密钥派生失败" << std::endl;
+    }
+    return key;
+}
+
 } // namespace
 
 namespace MailCrypto {
 
 const char* kEncMagicXor = "MailForge::ENC::XOR::";
+const char* kEncMagicAes = "MailForge::ENC::AES::";
 
 // ==================== Base64（RFC 4648） ====================
 
@@ -330,6 +348,58 @@ bool decryptEnvelope(const std::string& envelopeText,
 
 bool isEnvelopeText(const std::string& text) {
     return text.find("-----BEGIN MAIL ENVELOPE-----") != std::string::npos;
+}
+
+// ============================================================================
+//  AES-256-CBC 对称通道（第二档可切换算法）
+// ============================================================================
+
+std::string encryptAesPayload(const std::string& plainText) {
+    const std::array<unsigned char, 32> key = AesChannelKey();
+    const std::vector<unsigned char> keyVec(key.begin(), key.end());
+
+    const std::vector<unsigned char> iv = mail::Aes::GenerateIv();
+    const std::vector<unsigned char> pt(plainText.begin(), plainText.end());
+    std::vector<unsigned char> ct;
+    if (!mail::Aes::Encrypt(keyVec, iv, pt, ct)) {
+        std::cerr << "[MailCrypto] AES 加密失败" << std::endl;
+        return std::string();
+    }
+
+    // 打包：IV(16 字节) + 密文 → Base64（带 76 字符换行，可安全进 SMTP）
+    std::string payload;
+    payload.reserve(iv.size() + ct.size());
+    for (unsigned char c : iv) payload += (char)c;
+    for (unsigned char c : ct) payload += (char)c;
+    return std::string(kEncMagicAes) + base64Encode(payload);
+}
+
+std::string decryptAesPayload(const std::string& cipherText) {
+    const std::string magic(kEncMagicAes);
+    if (cipherText.compare(0, magic.size(), magic) != 0) return std::string();
+
+    const std::array<unsigned char, 32> key = AesChannelKey();
+    const std::vector<unsigned char> keyVec(key.begin(), key.end());
+
+    const std::string raw = base64Decode(cipherText.substr(magic.size()));
+    if (raw.size() <= 16) {
+        std::cerr << "[MailCrypto] AES 解密失败：数据不完整" << std::endl;
+        return std::string();
+    }
+    const std::vector<unsigned char> iv(raw.begin(), raw.begin() + 16);
+    const std::vector<unsigned char> ct(raw.begin() + 16, raw.end());
+
+    std::vector<unsigned char> pt;
+    if (!mail::Aes::Decrypt(keyVec, iv, ct, pt)) {
+        std::cerr << "[MailCrypto] AES 解密失败（密钥/密文不匹配或已损坏）" << std::endl;
+        return std::string();
+    }
+    return std::string(pt.begin(), pt.end());
+}
+
+bool isAesPayload(const std::string& text) {
+    const std::string magic(kEncMagicAes);
+    return text.compare(0, magic.size(), magic) == 0;
 }
 
 } // namespace MailCrypto

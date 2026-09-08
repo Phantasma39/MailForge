@@ -38,6 +38,7 @@ enum CryptoAlgo {
 
 // 加密后的"签名头"，用来识别一段文本是不是本模块加密过的
 extern const char* kEncMagicXor;   // "MailForge::ENC::XOR::"
+extern const char* kEncMagicAes;   // "MailForge::ENC::AES::"
 
 // ---- 对外主接口 ----
 // 对整封邮件文本加密。algo=ALGO_NONE 时原样返回（走明文通道）。
@@ -88,6 +89,22 @@ bool decryptEnvelope(const std::string& envelopeText,
 
 // 判断一段文本是否为 ASCII 数字信封（含 "-----BEGIN MAIL ENVELOPE-----" 标记）
 bool isEnvelopeText(const std::string& text);
+
+// ==================== AES-256-CBC 对称通道（第二档可切换算法） ====================
+// 用途：作为数字信封之外的第二档可选加密算法（requirements.md §5 要求 ≥2 种可切换）。
+// 密钥：由模块内固定口令派生（SHA-256 → 32 字节密钥），无需密钥文件/密钥管理；
+//       适合课程演示与验收；生产环境应改为密钥协商（此时请用数字信封通道）。
+// 落地格式：输出 = "MailForge::ENC::AES::" + Base64(IV(16字节) + AES-256-CBC密文)
+//          （密文含 PKCS#7 填充；Base64 已做 76 字符换行，可安全进 SMTP）。
+
+// AES 对称加密：返回带签名头的密文文本（失败返回空串）
+std::string encryptAesPayload(const std::string& plainText);
+
+// AES 对称解密：输入带签名头的密文文本，返回明文（失败返回空串）
+std::string decryptAesPayload(const std::string& cipherText);
+
+// 判断一段文本是否为 AES 对称通道加密（以 kEncMagicAes 开头）
+bool isAesPayload(const std::string& text);
 
 // ---- 基础算法（各自独立、可单独调用，方便单元测试） ----
 // Base64 编码 / 解码（3 字节 → 4 字符，RFC 4648）

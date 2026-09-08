@@ -98,6 +98,10 @@ test-crypto: $(T_B64) $(T_LOG) $(T_SOCK) $(T_CRYP)
 demo-crypto: $(D_DEMO) $(D_VIS) $(C_CLI)
 	./$(D_DEMO)
 
+# 端到端回归：自动启停服务器，跑协议/HTTP/加密/附件/协议终端全链路断言
+test-e2e: server
+	python3 tests/e2e_regression.py
+
 all: server client test-crypto
 
 clean:

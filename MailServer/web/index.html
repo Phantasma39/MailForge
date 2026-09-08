@@ -51,7 +51,11 @@
   收件人:<input id="inTo" placeholder="如 alice@example.com" style="width:60%"><br>
   主题  :<input id="inSubject" style="width:60%"><br>
   正文  :<textarea id="inBody" placeholder="邮件正文…"></textarea><br>
-  <label><input type="checkbox" id="inEncrypt"> 发送时加密（数字信封 AES-256 + RSA-2048）</label><br>
+  加密方式：<select id="inEncrypt">
+    <option value="0">不加密</option>
+    <option value="1" selected>数字信封 AES-256 + RSA-2048（推荐）</option>
+    <option value="2">AES-256-CBC 对称</option>
+  </select><br>
   附件:<input type="file" id="inFile" onchange="onFilePick()">
   <span id="fileInfo"></span><br>
   <button onclick="doSend()">发送</button>
@@ -167,7 +171,8 @@ function onFilePick(){
 
 async function doSend(){
   const obj = { token: TOKEN, to: inTo.value.trim(), subject: inSubject.value, body: inBody.value };
-  if (document.getElementById("inEncrypt").checked) obj.encrypt = "1";
+  const encMode = document.getElementById("inEncrypt").value;
+  if (encMode !== "0") obj.encrypt = encMode;   // "1"=数字信封 "2"=AES-256 对称
   if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
   const j = await post("/api/send", obj);
   setMsg("sendMsg", j.msg, !j.ok);
