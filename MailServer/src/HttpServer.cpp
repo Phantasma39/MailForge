@@ -1460,14 +1460,17 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
     }
 
     // 汇总（用于 JSON 顶层与"全部模式"的概览）
-    resp.contentType = "application/json; charset=utf-8";
-    resp.body =
+    const std::string plainBody =
         std::string("{\"ok\":true")
         + ",\"modes\":[" + resultsJson + "]"
         + ",\"sizeBytes\":" + std::to_string(mailBytes)
         + ",\"count\":\"" + modeParam + "\""
         + ",\"totalMs\":" + std::to_string(nowMs() - startMs)
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
+    resp.contentType = "application/json; charset=utf-8";
+    // 压测与发信一致：请求带 web=1 且登记过浏览器公钥时，结果以 RSA 信封返回
+    if (sealWebResponseIfNeeded(req, session, plainBody, resp)) return;
+    resp.body = plainBody;
 }
 
 

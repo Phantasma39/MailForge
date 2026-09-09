@@ -264,6 +264,10 @@
             <option value="all">三种全跑（明文 + AES + ChaCha）</option>
           </select>
         </div>
+        <div class="field" style="display:flex;gap:10px;align-items:center">
+          <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
+          <label style="margin:0">层1：压测请求/结果走 Web↔服务器 RSA 信封（与发信一致，可关）</label>
+        </div>
         <p class="muted" style="margin:0 0 12px">加密模式会逐封 RETR 验证“密文可被正确解密还原”。每模式约 30~90 秒，三种全跑约 2~4 分钟，期间请勿关闭页面。</p>
         <button class="btn primary" id="btnBench" onclick="runBench()">开始压测</button>
         <div class="msg" id="benchMsg"></div>
@@ -615,9 +619,9 @@ async function runBench(){
   setMsg("benchMsg", "⏳ 压测进行中（" + (names[mode] || mode) +
          "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
   try{
-    const r = await fetch("/api/benchmark?token=" + encodeURIComponent(TOKEN)
-                          + "&encrypt=" + encodeURIComponent(mode));
-    const j = await r.json();
+    // 与发信一致：压测请求/结果可选走 Web↔服务器 RSA 信封（层1）
+    const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode),
+                                 null, $("benchRsa").checked);
     if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
     if (!j || !Array.isArray(j.modes)){
       setMsg("benchMsg",
@@ -743,12 +747,15 @@ const WebRSA = {
     return new TextDecoder().decode(pt);
   },
 };
-async function webFetchJson(path, params){
-  /* 统一 GET 工具：启用 RSA 时带 web=1；返回已解封的 JSON 对象 */
+async function webFetchJson(path, params, useRsa){
+  /* 统一 GET 工具：已含 ?query 的 path 会正确拼接 token。
+     useRsa：undefined=按当前 WebRSA 状态；true/false=强制/禁用本请求的信封。 */
   await WebRSA.ensureInit();
-  const use = WebRSA.enabled;
-  const r = await fetch(path + (params ? "&" : "?") + "token=" + encodeURIComponent(TOKEN)
-                         + (use ? "&web=1" : ""));
+  const use = (useRsa === undefined) ? WebRSA.enabled : useRsa;
+  const sep = path.indexOf("?") >= 0 ? "&" : "?";
+  const url = path + sep + "token=" + encodeURIComponent(TOKEN)
+              + (use ? "&web=1" : "");
+  const r = await fetch(url);
   let j = await r.json();
   if (j && j.cipher) j = JSON.parse(await WebRSA.unseal(j.cipher));
   return j;
