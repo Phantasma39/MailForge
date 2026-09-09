@@ -28,6 +28,7 @@ crypto/tests/test_socket
 crypto/tests/test_crypto
 crypto/tests/demo_envelope
 crypto/tests/demo_visual
+crypto/tests/test_rsa_web
 crypto/tools/crypto_cli
 
 # ---- 运行时数据（启动服务器后自动生成） ----

@@ -65,6 +65,39 @@ bool getUserKey(const std::string& userKey,
 bool ensureUserKey(const std::string& userKey,
                    const std::string& keyDir = "./keys");
 
+// ============================================================================
+//  Web ↔ 服务器 RSA 信封（第一层：浏览器到 HTTP 服务器，调用 OpenSSL 库）
+// ============================================================================
+// 用途：本机没有 TLS 时，给浏览器↔8080 之间的邮件内容提供应用层机密性；
+//       配合上文自研 AES/ChaCha（服务器 8080↔SMTP/POP3 端口之间、不调库），
+//       构成 MailForge 的两层加密。
+// 信封线格式（浏览器 WebCrypto 与 OpenSSL 互通，均为标准算法）：
+//     k=<Base64 RSA-OAEP-SHA256(随机 AES-256-GCM 会话密钥)>|
+//     iv=<Base64 GCM IV(12B)>|
+//     ct=<Base64 AES-256-GCM 密文(末尾含 16B tag)>
+// 浏览器端实现：WebCrypto（window.crypto.subtle，无第三方库）。
+//
+// 服务器 RSA-2048 密钥对（OpenSSL PEM，首次使用自动生成）：
+//     <keyDir>/server_public.pem   发给浏览器做 RSA-OAEP（PKCS#8 SubjectPublicKeyInfo）
+//     <keyDir>/server_private.pem  服务器解浏览器信封用
+
+// 确保服务器 RSA-2048 密钥对存在（不存在则自动生成）
+bool ensureWebRsaKeys(const std::string& keyDir = "./keys");
+
+// 读取服务器 RSA 公钥（PKCS#8 PEM），返回给浏览器 import
+bool webServerPublicKeyPem(std::string& pemOut,
+                           const std::string& keyDir = "./keys");
+
+// 服务器解开浏览器发来的 RSA 信封 → 明文（用服务器私钥）
+bool webEnvelopeOpen(const std::string& packed,
+                     std::string& plainOut,
+                     const std::string& keyDir = "./keys");
+
+// 服务器用收信方(浏览器上传的 RSA 公钥 PEM)封装一段明文 → 信封
+bool webEnvelopeSeal(const std::string& plain,
+                     const std::string& recipientPublicPem,
+                     std::string& packedOut);
+
 // ---- 基础工具 ----
 // Base64 编码 / 解码（RFC 4648；编码时每 76 字符换行以兼容 SMTP 行长限制）
 std::string base64Encode(const std::string& data);

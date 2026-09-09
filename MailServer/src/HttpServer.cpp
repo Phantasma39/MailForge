@@ -737,6 +737,10 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleBenchmark(req, resp);
     } else if (req.method == "GET" && req.path == "/api/attachment") {
         handleAttachment(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/webkey") {
+        handleWebKey(req, resp);                     // Web↔服务器 RSA：下发服务器公钥
+    } else if (req.method == "POST" && req.path == "/api/webpub") {
+        handleWebPub(req, resp);                     // Web↔服务器 RSA：登记浏览器公钥
     } else if (req.method == "POST" && req.path == "/api/raw/smtp/open") {
         handleRawOpen("smtp", req, resp);
     } else if (req.method == "POST" && req.path == "/api/raw/smtp/send") {
@@ -857,6 +861,22 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     if (!loginAndGetSession(getParam(req, "token"), session)) {
         resp.body = jsonResult(false, "token 无效或已过期，请先登录");
         return;
+    }
+
+    // ===================== 【第一层】Web↔服务器 RSA 信封解包 =====================
+    // 浏览器把整个发送表单（to/subject/body/附件/algo…）加密成 RSA 信封放进 env 字段；
+    // 这里用服务器 RSA 私钥拆封，解出的字段合并进 req.form，
+    // 后续业务逻辑（含第二层 AES/ChaCha 对称加密→SMTP）完全复用、无需改动。
+    const std::string webEnv = getParam(req, "env");
+    if (!webEnv.empty()) {
+        std::string inner;
+        if (!MailCrypto::webEnvelopeOpen(webEnv, inner)) {
+            resp.body = jsonResult(false,
+                "Web RSA 信封解密失败（服务器密钥不匹配或内容被篡改）");
+            return;
+        }
+        HttpRequest& mutReq = const_cast<HttpRequest&>(req);
+        parseKeyValues(inner, mutReq.form);   // parseKeyValues 是合并语义（不清空）
     }
 
     std::string to      = getParam(req, "to");
@@ -1005,6 +1025,8 @@ void HttpServer::handleInbox(const HttpRequest& req, HttpResponse& resp) {
     json += "]}";
 
     pop3.quit();   // 注意：没 DELE 任何邮件，服务器上的信不会丢（网页收信≠删信）
+    // 【第一层】若浏览器登记过 RSA 公钥且带 web=1，整个收件箱 JSON 用信封返回
+    if (sealWebResponseIfNeeded(req, session, json, resp)) return;
     resp.body = json;
 }
 
@@ -1053,10 +1075,14 @@ void HttpServer::handleMail(const HttpRequest& req, HttpResponse& resp) {
     }
     attJson += "]";
 
-    resp.body = "{\"ok\":true,\"number\":" + std::to_string(number)
-              + ",\"encrypted\":" + (decoded.encrypted ? "true" : "false")
-              + ",\"raw\":\"" + jsonEscape(decoded.display) + "\","
-              + attJson + "}";
+    const std::string plainBody =
+        std::string("{\"ok\":true,\"number\":") + std::to_string(number)
+        + ",\"encrypted\":" + (decoded.encrypted ? "true" : "false")
+        + ",\"raw\":\"" + jsonEscape(decoded.display) + "\","
+        + attJson + "}";
+    // 【第一层】浏览器登记过 RSA 公钥且带 web=1 → 明文 raw 用信封封装返回
+    if (sealWebResponseIfNeeded(req, session, plainBody, resp)) return;
+    resp.body = plainBody;
 }
 
 // ==================== GET /api/attachment ====================
@@ -1117,7 +1143,71 @@ void HttpServer::handleAttachment(const HttpRequest& req, HttpResponse& resp) {
     resp.statusText  = "OK";
     resp.contentType = a.contentType.empty() ? "application/octet-stream" : a.contentType;
     resp.extraHeaders = "Content-Disposition: attachment; filename=\"" + fn + "\"\r\n";
+    // 【第一层】web=1 时附件二进制也走 RSA 信封（信封内是 Base64 编码的附件数据）
+    if (getParam(req, "web") == "1" && !session.webPubPem.empty()) {
+        std::string b64 = MailCrypto::base64Encode(data);
+        if (sealWebResponseIfNeeded(req, session, b64, resp)) return;
+    }
     resp.body = data;
+}
+
+// ==================== Web↔服务器 RSA 密钥交换（第一层加密） ====================
+
+// GET /api/webkey → 下发服务器 RSA 公钥（浏览器用它加密"发给服务器"的邮件表单）
+void HttpServer::handleWebKey(const HttpRequest& req, HttpResponse& resp) {
+    (void)req;   // 下发公钥无需登录态（公钥本身公开）
+    resp.contentType = "application/json; charset=utf-8";
+    std::string pem;
+    if (!MailCrypto::ensureWebRsaKeys() ||
+        !MailCrypto::webServerPublicKeyPem(pem)) {
+        resp.body = jsonResult(false,
+            "服务器 RSA 密钥初始化失败（检查 keys/ 目录权限与 OpenSSL 链接）");
+        return;
+    }
+    resp.body = std::string("{\"ok\":true,\"pem\":\"") + jsonEscape(pem) + "\"}";
+}
+
+// POST /api/webpub 参数：token, pem —— 浏览器上传自己的 RSA-2048 公钥。
+// 之后服务器对 /api/inbox、/api/mail、/api/attachment 的 web=1 响应做信封封装。
+void HttpServer::handleWebPub(const HttpRequest& req, HttpResponse& resp) {
+    resp.contentType = "application/json; charset=utf-8";
+    const std::string token = getParam(req, "token");
+    std::string pem = getParam(req, "pem");
+    if (token.empty() || pem.empty() ||
+        pem.find("BEGIN PUBLIC KEY") == std::string::npos) {
+        resp.body = jsonResult(false, "参数不合法：需要 token 与 PKCS#8 PEM 公钥");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        auto it = sessions_.find(token);
+        if (it == sessions_.end()) {
+            resp.body = jsonResult(false, "token 无效或已过期");
+            return;
+        }
+        it->second.webPubPem = pem;
+    }
+    resp.body = jsonResult(true, "Web RSA 公钥已登记：读信响应将加密返回");
+}
+
+// 若该会话登记过浏览器 RSA 公钥且本次请求带 web=1：
+//   把明文响应封装成 RSA 信封，输出 {"ok":true,"cipher":"k=..|iv=..|ct=.."}，
+//   返回 true；否则不动 resp、返回 false（按原明文逻辑继续）。
+bool HttpServer::sealWebResponseIfNeeded(const HttpRequest& req, Session& session,
+                                         const std::string& plainResp,
+                                         HttpResponse& resp) {
+    if (getParam(req, "web") != "1" || session.webPubPem.empty()) return false;
+    std::string packed;
+    if (!MailCrypto::webEnvelopeSeal(plainResp, session.webPubPem, packed)) {
+        std::cerr << "[HTTP] Web RSA 信封封装失败，降级为明文返回" << std::endl;
+        return false;
+    }
+    resp.status      = 200;
+    resp.statusText  = "OK";
+    resp.contentType = "application/json; charset=utf-8";
+    resp.extraHeaders.clear();
+    resp.body = std::string("{\"ok\":true,\"cipher\":\"") + jsonEscape(packed) + "\"}";
+    return true;
 }
 
 // ==================== POST /api/delete ====================

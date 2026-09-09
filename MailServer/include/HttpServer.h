@@ -68,6 +68,9 @@ private:
     struct Session {
         std::string user;   // 登录名（如 bob）
         std::string pass;   // 密码（本课程演示用明文保存；生产环境应存哈希）
+        std::string webPubPem;  // 浏览器上传的 RSA-2048 公钥（PKCS#8 PEM）。
+                                // 非空时 /api/mail、/api/inbox、/api/attachment
+                                // 支持 web=1 的响应会用该公钥封装成 RSA 信封返回
     };
     std::map<std::string, Session> sessions_;   // 已登录会话表
     std::mutex sessionsMutex_;                  // 保护会话表（多线程同时登录/退出）
@@ -95,6 +98,13 @@ private:
     void handleDelete(const HttpRequest& req, HttpResponse& resp);   // POST /api/delete
     void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
     void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
+    // Web↔服务器 RSA 密钥交换（第一层加密）
+    void handleWebKey(const HttpRequest& req, HttpResponse& resp);   // GET  /api/webkey 下发服务器 RSA 公钥
+    void handleWebPub(const HttpRequest& req, HttpResponse& resp);   // POST /api/webpub 接收浏览器 RSA 公钥
+    // 若 session 登记了浏览器公钥且请求带 web=1：把明文响应封装成 RSA 信封写回，
+    // 返回 true（调用方直接 return）；否则返回 false（按原明文逻辑输出）。
+    bool sealWebResponseIfNeeded(const HttpRequest& req, Session& session,
+                                 const std::string& plainResp, HttpResponse& resp);
     void handleRawOpen(const std::string& proto, const HttpRequest& req, HttpResponse& resp);
     void handleRawSend(const std::string& proto, const HttpRequest& req, HttpResponse& resp);
     void handleRawClose(const std::string& proto, const HttpRequest& req, HttpResponse& resp);

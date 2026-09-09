@@ -197,8 +197,12 @@
           <label>正文</label>
           <textarea id="inBody" placeholder="邮件正文…"></textarea>
         </div>
+        <div class="field" style="display:flex;gap:10px;align-items:center">
+          <input type="checkbox" id="inWebRsa" checked style="width:auto;margin:0">
+          <label style="margin:0">层1：Web↔服务器 RSA 信封（AES-256-GCM + RSA-2048 · WebCrypto↔OpenSSL）</label>
+        </div>
         <div class="field">
-          <label>发送时加密（算法在传输/落盘前对整封邮件加密）</label>
+          <label>层2：发送时加密（服务器端口间 AES/ChaCha，传输与落盘前加密）</label>
           <select id="inAlgo">
             <option value="none">不加密（明文）</option>
             <option value="aes" selected>AES-256-CBC（自研）</option>
@@ -326,6 +330,7 @@ async function doLogin(){
   TOKEN = j.token; CURRENT_USER = user;
   localStorage.setItem("mf_token", TOKEN);
   localStorage.setItem("mf_user", CURRENT_USER);
+  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web↔服务器 RSA（后台）
   setMsg("loginMsg", "登录成功", false);
   showLoginState();
 }
@@ -341,6 +346,7 @@ async function doRegister(){
   TOKEN = j.token; CURRENT_USER = u;
   localStorage.setItem("mf_token", TOKEN);
   localStorage.setItem("mf_user", CURRENT_USER);
+  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web↔服务器 RSA（后台）
   setMsg("regMsg", "注册成功，已自动登录", false);
   showLoginState();
 }
@@ -348,6 +354,7 @@ async function doRegister(){
 async function doLogout(){
   if (TOKEN) await post("/api/logout", { token: TOKEN });
   TOKEN = ""; CURRENT_USER = "";
+  WebRSA.reset(); WebRSA.enabled = false;
   localStorage.removeItem("mf_token");
   localStorage.removeItem("mf_user");
   showLoginState();
@@ -387,18 +394,32 @@ function onFilePick(){
 async function doSend(){
   const to = $("inTo").value.trim(), subject = $("inSubject").value, body = $("inBody").value;
   if (!to || !subject){ setMsg("sendMsg", "请填写收件人和主题", true); return; }
-  const obj = { token: TOKEN, to: to, subject: subject, body: body };
   const algo = $("inAlgo").value;
-  if (algo !== "none"){ obj.encrypt = "1"; obj.algo = algo; }
-  if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
-  setMsg("sendMsg", "发送中…", false);
-  const j = await post("/api/send", obj);
-  if (!j.ok){ setMsg("sendMsg", j.msg, true); return; }
-  setMsg("sendMsg", j.msg, false);
-  $("inTo").value = ""; $("inSubject").value = ""; $("inBody").value = "";
-  ATT = { filename:"", b64:"" };
-  $("inFile").value = ""; $("fileInfo").textContent = "";
-  goto("inbox");
+
+  await WebRSA.ensureInit();                 // 确保第一层（RSA 信封）就绪
+  const useLayer1 = $("inWebRsa").checked && WebRSA.enabled;
+  let j;
+  if (useLayer1){
+    // 层1：浏览器用"服务器公钥"把整个发送表单封成 RSA 信封（AES-GCM+RSA-OAEP），
+    //      服务器解包后继续走层2（AES/ChaCha 对称加密 → SMTP 端口间传输）。
+    const plain = new URLSearchParams({ to, subject, body, algo });
+    if (algo !== "none") plain.set("encrypt", "1");
+    if (ATT.filename && ATT.b64){ plain.set("filename", ATT.filename); plain.set("fileB64", ATT.b64); }
+    const env = await WebRSA.seal(plain.toString());
+    j = await post("/api/send", { token: TOKEN, env });
+  } else {
+    const obj = { token: TOKEN, to, subject, body };
+    if (algo !== "none"){ obj.encrypt = "1"; obj.algo = algo; }
+    if (ATT.filename && ATT.b64){ obj.filename = ATT.filename; obj.fileB64 = ATT.b64; }
+    j = await post("/api/send", obj);
+  }
+  setMsg("sendMsg", j.msg, !j.ok);
+  if (j.ok){
+    ATT = { filename:"", b64:"" };
+    $("inFile").value = "";
+    $("fileInfo").textContent = "";
+    goto("inbox");
+  }
 }
 
 /* ==================== 收件箱列表 ==================== */
@@ -413,8 +434,8 @@ async function loadInbox(){
   const tb = $("mailRows");
   tb.innerHTML = "<div class='mail-empty'>正在加载…</div>";
   try{
-    const r = await fetch("/api/inbox?token=" + encodeURIComponent(TOKEN));
-    const j = await r.json();
+    // 层1开启时用 web=1 + RSA 信封取收件箱（webFetchJson 自动解封）
+    const j = await webFetchJson("/api/inbox", "");
     if (!j.ok){ setMsg("inboxMsg", j.msg, true); tb.innerHTML=""; return; }
     setMsg("inboxMsg", "共 " + j.mails.length + " 封", false);
     $("inboxCount").textContent = " (" + j.mails.length + ")";
@@ -507,8 +528,7 @@ function visibleBodyText(raw){
 
 async function readMail(n){
   CURRENT_N = n;
-  const r = await fetch("/api/mail?token=" + encodeURIComponent(TOKEN) + "&n=" + n);
-  const j = await r.json();
+  const j = await webFetchJson("/api/mail?n=" + n);
   if (!j.ok){ alert(j.msg); return; }
 
   $("inboxListPane").style.display = "none";
@@ -548,16 +568,32 @@ async function readMail(n){
   }
 }
 
-function downloadAttachment(n, i, name){
-  fetch("/api/attachment?token=" + encodeURIComponent(TOKEN) + "&n=" + n + "&i=" + i)
-    .then(r => { if (!r.ok) throw new Error("下载失败"); return r.blob(); })
-    .then(blob => {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = name || ("attachment" + i);
-      document.body.appendChild(a); a.click(); a.remove();
-    })
-    .catch(e => alert(String(e)));
+async function downloadAttachment(n, i, name){
+  try{
+    await WebRSA.ensureInit();
+    const base = "/api/attachment?n=" + n + "&i=" + i
+               + "&token=" + encodeURIComponent(TOKEN);
+    let blob;
+    if (WebRSA.enabled){
+      // 层1：附件经 RSA 信封返回，解封后是 Base64 的原始字节
+      const r = await fetch(base + "&web=1");
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.msg || "下载失败");
+      const b64 = await WebRSA.unseal(j.cipher);
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; ++k) bytes[k] = bin.charCodeAt(k);
+      blob = new Blob([bytes], { type:"application/octet-stream" });
+    } else {
+      const r = await fetch(base);
+      if (!r.ok) throw new Error("下载失败");
+      blob = await r.blob();
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name || ("attachment" + i);
+    document.body.appendChild(a); a.click(); a.remove();
+  }catch(e){ alert(String(e)); }
 }
 
 async function doDelete(){
@@ -618,6 +654,104 @@ async function runBench(){
     btn.disabled = false;
     loadInbox();
   }
+}
+
+/* ==================== 第一层：Web↔服务器 RSA 信封（浏览器 WebCrypto） ==================== */
+/* 与服务器 MailCrypto::webEnvelopeSeal/Open 互通：
+   k=<Base64 RSA-OAEP-SHA256(随机 AES-256-GCM 会话密钥)>|iv=<Base64 IV(12B)>|ct=<Base64 GCM密文+tag>
+   浏览器密钥对（RSA-OAEP-2048）以 JWK 存 localStorage，公钥上传 /api/webpub。 */
+const WebRSA = {
+  enabled: false,
+  serverPub: null,
+  privKey: null,
+  _init: null,
+  b64e(buf){ const u = new Uint8Array(buf); let s = "";
+    for (let i=0;i<u.length;i+=0x8000) s += String.fromCharCode.apply(null, u.subarray(i,i+0x8000));
+    return btoa(s); },
+  b64d(s){ s = String(s).replace(/[\r\n\s]/g, ""); const bin = atob(s);
+    const u = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+    return u; },
+  pemToBuf(pem){ return this.b64d(pem.replace(/-----[^-]+-----/g, "")); },
+  bufToPem(ab){ const b = this.b64e(ab).match(/.{1,64}/g) || [];
+    return "-----BEGIN PUBLIC KEY-----\n" + b.join("\n") + "\n-----END PUBLIC KEY-----\n"; },
+  async init(){
+    if (this.enabled) return true;
+    if (!window.crypto || !crypto.subtle) return false;
+    try {
+      const rj = await (await fetch("/api/webkey")).json();
+      if (!rj.ok || !rj.pem) return false;
+      this.serverPub = await crypto.subtle.importKey("spki", this.pemToBuf(rj.pem),
+                          { name:"RSA-OAEP", hash:"SHA-256" }, false, ["encrypt"]);
+      let jwk = null;
+      const saved = localStorage.getItem("mf_webrsa_jwk");
+      if (saved){ try{ jwk = JSON.parse(saved); }catch(e){ jwk = null; } }
+      if (!jwk){
+        const kp = await crypto.subtle.generateKey(
+            { name:"RSA-OAEP", modulusLength:2048,
+              publicExponent:new Uint8Array([1,0,1]), hash:"SHA-256" },
+            true, ["decrypt","encrypt"]);
+        jwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+        localStorage.setItem("mf_webrsa_jwk", JSON.stringify(jwk));
+        this.privKey = kp.privateKey;
+        const pubPem = this.bufToPem(await crypto.subtle.exportKey("spki", kp.publicKey));
+        await this.uploadPub(pubPem);
+      } else {
+        this.privKey = await crypto.subtle.importKey("jwk", jwk,
+            { name:"RSA-OAEP", hash:"SHA-256" }, true, ["decrypt"]);
+        const pub = await crypto.subtle.importKey("jwk",
+            { kty:"RSA", n:jwk.n, e:jwk.e, alg:"RSA-OAEP-256", ext:true },
+            { name:"RSA-OAEP", hash:"SHA-256" }, true, ["encrypt"]);
+        const pubPem = this.bufToPem(await crypto.subtle.exportKey("spki", pub));
+        await this.uploadPub(pubPem);
+      }
+      this.enabled = true;
+      return true;
+    } catch(e){
+      console.warn("[WebRSA] 初始化失败，本会话降级为明文 HTTP", e);
+      return false;
+    }
+  },
+  async uploadPub(pem){
+    if (!TOKEN) return;
+    await fetch("/api/webpub", { method:"POST",
+      headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: TOKEN, pem }) });
+  },
+  ensureInit(){
+    if (this._init === null) this._init = this.init();
+    return this._init;
+  },
+  reset(){ this.enabled = false; this._init = null; },
+  async seal(plainText){            // 浏览器 → 服务器信封
+    await this.ensureInit();
+    if (!this.enabled) return "";
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const sk = await crypto.subtle.generateKey({ name:"AES-GCM", length:256 }, true, ["encrypt"]);
+    const ct = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, sk,
+                                            new TextEncoder().encode(plainText));
+    const raw = await crypto.subtle.exportKey("raw", sk);
+    const wrapped = await crypto.subtle.encrypt({ name:"RSA-OAEP" }, this.serverPub, raw);
+    return "k=" + this.b64e(wrapped) + "|iv=" + this.b64e(iv) + "|ct=" + this.b64e(ct);
+  },
+  async unseal(packed){             // 服务器 → 浏览器信封
+    const f = n => { const m = new RegExp("(?:^|\\|)" + n + "=([^|]*)").exec(packed);
+                     return m ? m[1] : ""; };
+    const wrapped = this.b64d(f("k")), iv = this.b64d(f("iv")), ct = this.b64d(f("ct"));
+    const raw = await crypto.subtle.decrypt({ name:"RSA-OAEP" }, this.privKey, wrapped);
+    const sk = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+    const pt = await crypto.subtle.decrypt({ name:"AES-GCM", iv }, sk, ct);
+    return new TextDecoder().decode(pt);
+  },
+};
+async function webFetchJson(path, params){
+  /* 统一 GET 工具：启用 RSA 时带 web=1；返回已解封的 JSON 对象 */
+  await WebRSA.ensureInit();
+  const use = WebRSA.enabled;
+  const r = await fetch(path + (params ? "&" : "?") + "token=" + encodeURIComponent(TOKEN)
+                         + (use ? "&web=1" : ""));
+  let j = await r.json();
+  if (j && j.cipher) j = JSON.parse(await WebRSA.unseal(j.cipher));
+  return j;
 }
 
 /* ==================== 初始化 ==================== */
