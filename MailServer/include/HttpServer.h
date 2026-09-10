@@ -15,6 +15,10 @@
 //                                              → 性能压测（含加密通道收发）
 //    GET  /api/mail?token=xxx&n=编号              → 读某一封完整原文
 //    POST /api/delete   参数: token, n            → 删除某一封（POP3 DELE+QUIT）
+//    GET  /api/sent?token=xxx                     → 已发送列表（本地 ./sent/<用户>/）
+//    GET  /api/sent/mail?token=xxx&n=编号          → 读某一封已发送邮件
+//    GET  /api/sent/attachment?token=xxx&n=编号&i=下标 → 下载已发送邮件附件
+//    POST /api/sent/delete  参数: token, n         → 删除某一封已发送邮件
 //    GET  /             → 静态页面（web/ 目录）
 //
 //  登录校验设计：直接拿用户名密码去连本机 POP3(1110) 试登录，
@@ -96,6 +100,11 @@ private:
     void handleInbox(const HttpRequest& req, HttpResponse& resp);    // GET /api/inbox
     void handleMail(const HttpRequest& req, HttpResponse& resp);     // GET /api/mail
     void handleDelete(const HttpRequest& req, HttpResponse& resp);   // POST /api/delete
+    // 已发送（本地 ./sent/<用户>/ 邮箱副本）
+    void handleSent(const HttpRequest& req, HttpResponse& resp);            // GET  /api/sent
+    void handleSentMail(const HttpRequest& req, HttpResponse& resp);        // GET  /api/sent/mail
+    void handleSentAttachment(const HttpRequest& req, HttpResponse& resp);  // GET  /api/sent/attachment
+    void handleSentDelete(const HttpRequest& req, HttpResponse& resp);      // POST /api/sent/delete
     void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
     void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
     // Web↔服务器 RSA 密钥交换（第一层加密）

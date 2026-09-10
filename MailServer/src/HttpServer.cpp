@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <algorithm>
+#include <dirent.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -711,6 +713,67 @@ std::string makeMultipartText(const std::string& boundary,
     return out;
 }
 
+// ==================== “已发送”本地副本（./sent/<用户>/*.eml） ====================
+
+// 邮箱地址 → 文件系统安全的用户名（与 MailCrypto 内部规则保持一致）
+std::string fsSafeUser(const std::string& addr) {
+    std::string u = addr;
+    std::size_t at = u.find('@');
+    if (at != std::string::npos) u = u.substr(0, at);
+    std::string out;
+    for (char c : u) {
+        if (isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_') {
+            out += (char)tolower((unsigned char)c);
+        }
+    }
+    return out;
+}
+
+std::string sentDirFor(const std::string& user) { return "./sent/" + user; }
+
+// 保存一封“已发送”副本（发件人本人邮箱）
+bool saveSentCopy(const std::string& from, const std::string& rawMail) {
+    const std::string u = fsSafeUser(from);
+    if (u.empty()) return false;
+    mkdir("./sent", 0755);
+    const std::string dir = sentDirFor(u);
+    mkdir(dir.c_str(), 0755);
+    const std::string file = dir + "/" + std::to_string((long)time(nullptr))
+                           + "_" + std::to_string(rand()) + ".eml";
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(rawMail.data(), (std::streamsize)rawMail.size());
+    return out.good();
+}
+
+// 读取整个文件
+bool readWholeFile(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    out.assign((std::istreambuf_iterator<char>(in)),
+               std::istreambuf_iterator<char>());
+    return true;
+}
+
+// 列出 ./sent/<用户>/*.eml，按文件名倒序（最新在前）
+std::vector<std::string> listSentFiles(const std::string& user) {
+    std::vector<std::string> files;
+    const std::string dir = sentDirFor(user);
+    DIR* d = opendir(dir.c_str());
+    if (!d) return files;
+    struct dirent* e = nullptr;
+    while ((e = readdir(d)) != nullptr) {
+        const std::string name = e->d_name;
+        if (name.size() > 4 &&
+            name.compare(name.size() - 4, 4, ".eml") == 0) {
+            files.push_back(dir + "/" + name);
+        }
+    }
+    closedir(d);
+    std::sort(files.begin(), files.end(), std::greater<std::string>());
+    return files;
+}
+
 } // namespace
 
 // ==================== REST API 入口 ====================
@@ -737,6 +800,14 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleBenchmark(req, resp);
     } else if (req.method == "GET" && req.path == "/api/attachment") {
         handleAttachment(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/sent") {
+        handleSent(req, resp);                       // 已发送列表
+    } else if (req.method == "GET" && req.path == "/api/sent/mail") {
+        handleSentMail(req, resp);                   // 已发送：读某一封
+    } else if (req.method == "GET" && req.path == "/api/sent/attachment") {
+        handleSentAttachment(req, resp);             // 已发送：下载附件
+    } else if (req.method == "POST" && req.path == "/api/sent/delete") {
+        handleSentDelete(req, resp);                 // 已发送：删除
     } else if (req.method == "GET" && req.path == "/api/webkey") {
         handleWebKey(req, resp);                     // Web↔服务器 RSA：下发服务器公钥
     } else if (req.method == "POST" && req.path == "/api/webpub") {
@@ -927,6 +998,7 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
     // ---- 拼一封标准邮件原文（头部区 + 空行 + 正文）----
     std::string mailSubject = subject;
     std::string cryptoHeader;   // 加密时额外写进头部区的标记行（便于识别/调试）
+    std::string sentRaw;        // “已发送”副本：加密信会用【发件人自己】的密钥再封一份，便于本人查看
     if (wantEncrypt) {
         // ===================== 加密挂钩点①（发送前） =====================
         // 把"真实主题 + 整个正文区(含附件 multipart)"打包成载荷，
@@ -953,6 +1025,20 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
         payload = cipher + "\r\n";
         mimeHeaders.clear();                          // 密文不再是 multipart，不挂 MIME 头
         cryptoHeader = "X-MailForge-Crypto: " + algoName + "\r\n";
+
+        // 另存一份“已发送”副本：用发件人自己的对称密钥加密同样的载荷，
+        // 这样收件箱用收件人密钥、发件箱用发件人密钥，双方各自能读。
+        std::string senderKey;
+        if (MailCrypto::getUserKey(from, senderKey)) {
+            std::string senderCipher = MailCrypto::encryptPayload(inner, senderKey, algo);
+            if (!senderCipher.empty()) {
+                sentRaw = "From: " + from + "\r\n"
+                          "To: " + to + "\r\n"
+                          "Subject: [加密邮件]\r\n"
+                          "X-MailForge-Crypto: " + algoName + "\r\n"
+                          "\r\n" + senderCipher + "\r\n";
+            }
+        }
     }
 
     std::string plain =
@@ -963,10 +1049,18 @@ void HttpServer::handleSend(const HttpRequest& req, HttpResponse& resp) {
         + cryptoHeader
         + "\r\n" + payload;
 
+    // 明文邮件（或加密副本生成失败的兜底）：直接把发出去的正文也存一份到“已发送”
+    if (sentRaw.empty()) sentRaw = plain;
+
     SmtpClient smtp(kMailServerIp, kSmtpPort);
     if (!smtp.sendRawMail(from, to, plain)) {
         resp.body = jsonResult(false, "SMTP 发送失败: " + smtp.getLastError());
         return;
+    }
+
+    // 保存“已发送”副本到 ./sent/<发件人>/
+    if (!saveSentCopy(from, sentRaw)) {
+        std::cerr << "[HTTP] 警告：已发送副本保存失败（" << from << "）" << std::endl;
     }
 
     std::cout << "[HTTP] " << session.user << " 发送邮件给 " << to
@@ -1151,6 +1245,174 @@ void HttpServer::handleAttachment(const HttpRequest& req, HttpResponse& resp) {
     resp.body = data;
 }
 
+// ==================== 已发送（本地副本 ./sent/<用户>/） ====================
+
+// GET /api/sent → 列出已发送邮件（最新在前）。
+// 返回：{"ok":true,"mails":[{number,size,subject,to,encrypted,attachment},...]}
+void HttpServer::handleSent(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+
+    const std::vector<std::string> files = listSentFiles(fsSafeUser(session.user));
+    std::string json = "{\"ok\":true,\"mails\":[";
+    int number = 0;
+    for (const std::string& path : files) {
+        std::string raw;
+        if (!readWholeFile(path, raw)) continue;
+        ++number;
+        const DecodedMail dm = decodeMail(raw, session.user);
+        std::vector<MimeAttachment> atts;
+        parseAttachments(dm.display, atts);
+        const std::string to = HttpServer::parseHeader(dm.display, "To");
+        if (number > 1) json += ",";
+        json += "{\"number\":" + std::to_string(number)
+              + ",\"size\":" + std::to_string((long long)raw.size())
+              + ",\"subject\":\"" + jsonEscape(dm.subject) + "\""
+              + ",\"to\":\"" + jsonEscape(to) + "\""
+              + ",\"encrypted\":" + (dm.encrypted ? "true" : "false")
+              + ",\"attachment\":" + (atts.empty() ? "false" : "true") + "}";
+    }
+    json += "]}";
+
+    if (sealWebResponseIfNeeded(req, session, json, resp)) return;
+    resp.body = json;
+}
+
+// GET /api/sent/mail?token=xxx&n=编号 → 读某一封已发送邮件（发件人按自己密钥解密）
+void HttpServer::handleSentMail(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    int number = atoi(getParam(req, "n").c_str());
+    if (number <= 0) {
+        resp.body = jsonResult(false, "缺少合法的 n（邮件编号）参数");
+        return;
+    }
+
+    const std::vector<std::string> files = listSentFiles(fsSafeUser(session.user));
+    if (number > (int)files.size()) {
+        resp.body = jsonResult(false, "编号超出范围（共 "
+                                    + std::to_string(files.size()) + " 封已发送）");
+        return;
+    }
+
+    std::string raw;
+    if (!readWholeFile(files[number - 1], raw)) {
+        resp.body = jsonResult(false, "读取已发送邮件失败");
+        return;
+    }
+
+    DecodedMail decoded = decodeMail(raw, session.user);
+    std::vector<MimeAttachment> atts;
+    parseAttachments(decoded.display, atts);
+    std::string attJson = "\"attachments\":[";
+    for (size_t k = 0; k < atts.size(); ++k) {
+        if (k > 0) attJson += ",";
+        attJson += "{\"i\":" + std::to_string(k)
+                 + ",\"filename\":\"" + jsonEscape(atts[k].filename)
+                 + "\",\"type\":\"" + jsonEscape(atts[k].contentType) + "\"}";
+    }
+    attJson += "]";
+
+    const std::string to = HttpServer::parseHeader(decoded.display, "To");
+    const std::string plainBody =
+        std::string("{\"ok\":true,\"number\":") + std::to_string(number)
+        + ",\"encrypted\":" + (decoded.encrypted ? "true" : "false")
+        + ",\"to\":\"" + jsonEscape(to) + "\""
+        + ",\"raw\":\"" + jsonEscape(decoded.display) + "\","
+        + attJson + "}";
+
+    if (sealWebResponseIfNeeded(req, session, plainBody, resp)) return;
+    resp.body = plainBody;
+}
+
+// GET /api/sent/attachment?token=xxx&n=编号&i=附件下标 → 下载已发送邮件的附件
+void HttpServer::handleSentAttachment(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    int number = atoi(getParam(req, "n").c_str());
+    int index  = atoi(getParam(req, "i").c_str());
+    if (number <= 0 || index < 0) {
+        resp.body = jsonResult(false, "缺少合法的 n / i 参数");
+        return;
+    }
+
+    const std::vector<std::string> files = listSentFiles(fsSafeUser(session.user));
+    if (number > (int)files.size()) {
+        resp.body = jsonResult(false, "编号超出范围");
+        return;
+    }
+    std::string raw;
+    if (!readWholeFile(files[number - 1], raw)) {
+        resp.body = jsonResult(false, "读取已发送邮件失败");
+        return;
+    }
+
+    DecodedMail decoded = decodeMail(raw, session.user);
+    std::vector<MimeAttachment> atts;
+    parseAttachments(decoded.display, atts);
+    if (index >= (int)atts.size()) {
+        resp.body = jsonResult(false, "该邮件没有这个附件下标");
+        return;
+    }
+    const MimeAttachment& a = atts[index];
+
+    std::string data;
+    std::string enc;
+    for (char c : a.encoding) enc += (char)tolower((unsigned char)c);
+    if (enc.find("base64") != std::string::npos) {
+        data = MailCrypto::base64Decode(a.content);
+    } else {
+        data = a.content;
+    }
+
+    std::string fn = a.filename;
+    for (char& c : fn) {
+        if (c == '"' || c == '\r' || c == '\n' || c == ';') c = '_';
+    }
+
+    resp.status      = 200;
+    resp.statusText  = "OK";
+    resp.contentType = a.contentType.empty() ? "application/octet-stream" : a.contentType;
+    resp.extraHeaders = "Content-Disposition: attachment; filename=\"" + fn + "\"\r\n";
+    if (getParam(req, "web") == "1" && !session.webPubPem.empty()) {
+        std::string b64 = MailCrypto::base64Encode(data);
+        if (sealWebResponseIfNeeded(req, session, b64, resp)) return;
+    }
+    resp.body = data;
+}
+
+// POST /api/sent/delete 参数：token, n → 删除一封已发送邮件
+void HttpServer::handleSentDelete(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    int number = atoi(getParam(req, "n").c_str());
+    if (number <= 0) {
+        resp.body = jsonResult(false, "缺少合法的 n（邮件编号）参数");
+        return;
+    }
+    const std::vector<std::string> files = listSentFiles(fsSafeUser(session.user));
+    if (number > (int)files.size()) {
+        resp.body = jsonResult(false, "编号超出范围");
+        return;
+    }
+    if (unlink(files[number - 1].c_str()) != 0) {
+        resp.body = jsonResult(false, "删除失败（文件可能已被移除）");
+        return;
+    }
+    resp.body = jsonResult(true, "已删除第 " + std::to_string(number) + " 封已发送邮件");
+}
 // ==================== Web↔服务器 RSA 密钥交换（第一层加密） ====================
 
 // GET /api/webkey → 下发服务器 RSA 公钥（浏览器用它加密"发给服务器"的邮件表单）

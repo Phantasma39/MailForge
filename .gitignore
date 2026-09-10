@@ -34,6 +34,7 @@ crypto/tools/crypto_cli
 # ---- 运行时数据（启动服务器后自动生成） ----
 mailbox/
 keys/
+sent/
 data/
 *.pem
 *.eml

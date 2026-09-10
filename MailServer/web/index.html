@@ -179,6 +179,7 @@
       <div class="side-inner">
         <button class="nav-btn on" data-sec="send"  onclick="goto('send')">✉ 写邮件</button>
         <button class="nav-btn" data-sec="inbox" onclick="goto('inbox')">📥 收件箱<span id="inboxCount"></span></button>
+        <button class="nav-btn" data-sec="sent"  onclick="goto('sent')">📤 已发送<span id="sentCount"></span></button>
         <button class="nav-btn" data-sec="bench" onclick="goto('bench')">⚡ 性能压测</button>
         <div class="side-hr"></div>
         <a class="nav-btn" href="/demo_smtp.html" style="display:block">🧪 SMTP 协议演示</a>
@@ -249,6 +250,38 @@
                  style="max-height:320px; overflow:auto; background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0 0"></pre>
           </details>
           <div class="mail-view-body" id="mailContent"></div>
+        </div>
+      </section>
+
+      <!-- 已发送 -->
+      <section class="view card" id="sec-sent">
+        <div id="sentListPane">
+          <div class="rowbar">
+            <h3>已发送</h3>
+            <button class="btn sm" onclick="loadSent()">↻ 刷新</button>
+          </div>
+          <div class="mail-list" id="sentRows"></div>
+          <div class="msg" id="sentMsg"></div>
+        </div>
+
+        <div id="sentReadPane" style="display:none">
+          <div class="rowbar">
+            <button class="btn sm" onclick="backToSentList()">← 返回列表</button>
+            <button class="btn sm danger" onclick="deleteSent()">删除这封</button>
+          </div>
+          <div class="mail-view-head">
+            <h3 id="sentSubject"></h3>
+            <div class="kv" id="sentTo"></div>
+            <div class="kv" id="sentMeta"></div>
+            <div class="msg" id="sentReadMsg"></div>
+          </div>
+          <div id="sentAttArea" style="display:none; margin-bottom:12px"></div>
+          <details id="sentRawToggle" style="margin-bottom:12px">
+            <summary style="cursor:pointer; color:var(--accent)">查看邮件原文（含 base64 附件）</summary>
+            <pre class="mail-view-body mono" id="sentRawContent"
+                 style="max-height:320px; overflow:auto; background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0 0"></pre>
+          </details>
+          <div class="mail-view-body" id="sentContent"></div>
         </div>
       </section>
 
@@ -367,13 +400,14 @@ async function doLogout(){
 
 /* ==================== 视图切换 ==================== */
 function goto(sec){
-  ["send", "inbox", "bench"].forEach(s => {
+  ["send", "inbox", "sent", "bench"].forEach(s => {
     $("sec-" + s).className = "view card" + (s === sec ? " on" : "");
   });
   document.querySelectorAll(".nav-btn[data-sec]").forEach(b => {
     b.className = "nav-btn" + (b.getAttribute("data-sec") === sec ? " on" : "");
   });
   if (sec === "inbox"){ backToList(); loadInbox(); }
+  if (sec === "sent"){ backToSentList(); loadSent(); }
   if (sec === "send"){ setMsg("sendMsg", "", false); }
 }
 /* ==================== 写邮件 + 附件 ==================== */
@@ -607,6 +641,122 @@ async function doDelete(){
   backToList();
   loadInbox();
 }
+/* ==================== 已发送 ==================== */
+let CURRENT_SENT_N = 0;
+
+function backToSentList(){
+  $("sentListPane").style.display = "";
+  $("sentReadPane").style.display = "none";
+}
+
+async function loadSent(){
+  if (!TOKEN) return;
+  const tb = $("sentRows");
+  tb.innerHTML = "<div class='mail-empty'>正在加载…</div>";
+  try{
+    const j = await webFetchJson("/api/sent");
+    if (!j.ok){ setMsg("sentMsg", j.msg, true); tb.innerHTML = ""; return; }
+    $("sentCount").textContent = " (" + j.mails.length + ")";
+    setMsg("sentMsg", "共 " + j.mails.length + " 封", false);
+    if (!j.mails.length){
+      tb.innerHTML = "<div class='mail-empty'>还没有已发送的邮件 —— 去写一封吧</div>";
+      return;
+    }
+    let html = "";
+    for (const m of j.mails){
+      const tags =
+        (m.encrypted ? "<span class='pill enc'>🔒 加密</span> " : "") +
+        (m.attachment ? "<span class='pill att'>📎</span>" : "");
+      html +=
+        "<div class='mail-row' onclick='readSent(" + m.number + ")'>" +
+          "<div style='min-width:56px'>" + tags + "</div>" +
+          "<div><div class='subject'>" + esc(m.subject) + "</div>" +
+            "<div class='muted' style='font-size:12px'>发给 " + esc(m.to || "") + "</div></div>" +
+          "<div class='meta'>" + fmtSize(m.size) + "</div>" +
+          "<div class='meta'>#" + m.number + "</div>" +
+        "</div>";
+    }
+    tb.innerHTML = html;
+  }catch(e){
+    tb.innerHTML = "";
+    setMsg("sentMsg", "加载失败: " + e, true);
+  }
+}
+
+async function readSent(n){
+  CURRENT_SENT_N = n;
+  const j = await webFetchJson("/api/sent/mail?n=" + n);
+  if (!j.ok){ alert(j.msg); return; }
+
+  $("sentListPane").style.display = "none";
+  $("sentReadPane").style.display = "";
+  $("sentReadMsg").textContent = ""; $("sentReadMsg").className = "msg";
+
+  const sepIdx = j.raw.indexOf("\r\n\r\n");
+  const head = sepIdx >= 0 ? j.raw.slice(0, sepIdx) : j.raw;
+  const subj = headField(head, "Subject") ||
+               (j.encrypted ? "(加密邮件，主题不可见)" : "(无主题)");
+  const to = headField(head, "To") || j.to || "";
+
+  $("sentSubject").textContent = (j.encrypted ? "🔒 " : "") + subj;
+  $("sentTo").textContent = "收件人: " + (to || "(未知)");
+  $("sentMeta").textContent = j.encrypted
+    ? "已发送 · 加密存储（用发送者本人密钥保存，可自动解密查看）"
+    : "已发送";
+
+  $("sentContent").textContent = visibleBodyText(j.raw) || "(无正文)";
+  $("sentRawContent").textContent = j.raw;
+  $("sentRawToggle").open = false;
+
+  const area = $("sentAttArea");
+  if (j.attachments && j.attachments.length){
+    area.style.display = "";
+    let h = "📎 附件：";
+    for (const a of j.attachments){
+      const fn = (a.filename || "file").replace(/['"]/g, "");
+      h += "<button class='btn sm' style='margin:0 4px 4px 0' onclick='downloadSentAttachment(" +
+           CURRENT_SENT_N + "," + a.i + ",\"" + fn + "\")'>⬇ " + esc(a.filename) + "</button>";
+    }
+    area.innerHTML = h;
+  } else {
+    area.style.display = "none"; area.innerHTML = "";
+  }
+}
+
+async function downloadSentAttachment(n, i, name){
+  try{
+    await WebRSA.ensureInit();
+    const base = "/api/sent/attachment?n=" + n + "&i=" + i
+               + "&token=" + encodeURIComponent(TOKEN);
+    let blob;
+    if (WebRSA.enabled){
+      const r = await fetch(base + "&web=1");
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.msg || "下载失败");
+      const b64 = await WebRSA.unseal(j.cipher);
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; ++k) bytes[k] = bin.charCodeAt(k);
+      blob = new Blob([bytes], { type:"application/octet-stream" });
+    } else {
+      const r = await fetch(base);
+      if (!r.ok) throw new Error("下载失败");
+      blob = await r.blob();
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name || ("attachment" + i);
+    document.body.appendChild(a); a.click(); a.remove();
+  }catch(e){ alert(String(e)); }
+}
+
+async function deleteSent(){
+  if (!confirm("确定删除第 " + CURRENT_SENT_N + " 封已发送邮件？")) return;
+  const j = await post("/api/sent/delete", { token: TOKEN, n: CURRENT_SENT_N });
+  setMsg("sentReadMsg", j.msg, !j.ok);
+  if (j.ok){ backToSentList(); loadSent(); }
+}
+
 /* ==================== 性能压测 ==================== */
 async function runBench(){
   const btn  = $("btnBench");
