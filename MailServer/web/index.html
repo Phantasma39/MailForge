@@ -357,6 +357,13 @@ function switchAuth(which){
   $("paneReg").style.display   = (which === "reg")   ? "" : "none";
 }
 
+function clearLoginState(){
+  TOKEN = ""; CURRENT_USER = "";
+  localStorage.removeItem("mf_token");
+  localStorage.removeItem("mf_user");
+  WebRSA.reset(); WebRSA.enabled = false;
+}
+
 function showLoginState(){
   const logged = !!TOKEN;
   $("authCard").style.display = logged ? "none" : "";
@@ -367,8 +374,7 @@ function showLoginState(){
     $("avatar").textContent = u.charAt(0).toUpperCase();
     $("curUser").textContent = u;
     $("curMail").textContent = u + "@example.com";
-    goto("inbox");
-    loadInbox();
+    goto("inbox");   // goto 内部已经会 loadInbox，避免重复请求
   }
 }
 
@@ -404,10 +410,7 @@ async function doRegister(){
 
 async function doLogout(){
   if (TOKEN) await post("/api/logout", { token: TOKEN });
-  TOKEN = ""; CURRENT_USER = "";
-  WebRSA.reset(); WebRSA.enabled = false;
-  localStorage.removeItem("mf_token");
-  localStorage.removeItem("mf_user");
+  clearLoginState();
   showLoginState();
   setMsg("loginMsg", "已退出登录", false);
 }
@@ -488,7 +491,16 @@ async function loadInbox(){
   try{
     // 层1开启时用 web=1 + RSA 信封取收件箱（webFetchJson 自动解封）
     const j = await webFetchJson("/api/inbox", "");
-    if (!j.ok){ setMsg("inboxMsg", j.msg, true); tb.innerHTML=""; return; }
+    if (!j.ok){
+      setMsg("inboxMsg", j.msg, true);
+      tb.innerHTML = "";
+      if (String(j.msg || "").indexOf("token") >= 0){
+        clearLoginState();
+        showLoginState();
+        setMsg("loginMsg", j.msg || "登录已过期，请重新登录", true);
+      }
+      return;
+    }
     setMsg("inboxMsg", "共 " + j.mails.length + " 封", false);
     $("inboxCount").textContent = " (" + j.mails.length + ")";
     if (!j.mails.length){
@@ -933,7 +945,29 @@ async function webFetchJson(path, params, useRsa){
 }
 
 /* ==================== 初始化 ==================== */
-showLoginState();
+async function initApp(){
+  if (!TOKEN){ showLoginState(); return; }
+
+  try {
+    // 启动时先校验 localStorage 里的 token，避免服务器重启后直接显示旧账号界面。
+    const j = await webFetchJson("/api/session");
+    if (!j || !j.ok){
+      clearLoginState();
+      showLoginState();
+      setMsg("loginMsg", (j && j.msg) ? j.msg : "登录已过期，请重新登录", true);
+      return;
+    }
+    CURRENT_USER = j.user || CURRENT_USER;
+    if (CURRENT_USER) localStorage.setItem("mf_user", CURRENT_USER);
+    showLoginState();
+  } catch(e){
+    clearLoginState();
+    showLoginState();
+    setMsg("loginMsg", "无法连接服务器，请稍后重试", true);
+  }
+}
+
+initApp();
 </script>
 
 </body>

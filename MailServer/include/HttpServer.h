@@ -95,6 +95,7 @@ private:
     // 各 /api 接口的具体实现（handler）
     void handleRegister(const HttpRequest& req, HttpResponse& resp); // POST /api/register
     void handleLogin(const HttpRequest& req, HttpResponse& resp);    // POST /api/login
+    void handleSession(const HttpRequest& req, HttpResponse& resp);  // GET  /api/session（校验 token）
     void handleLogout(const HttpRequest& req, HttpResponse& resp);   // POST /api/logout
     void handleSend(const HttpRequest& req, HttpResponse& resp);     // POST /api/send
     void handleInbox(const HttpRequest& req, HttpResponse& resp);    // GET /api/inbox

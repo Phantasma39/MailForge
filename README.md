@@ -57,7 +57,7 @@ MailForge/
 │   ├── include/ src/     #   协议 / HTTP / 加密模块源码
 │   ├── web/              #   前端页面（index / demo_smtp / demo_pop3）
 │   ├── client_test.cpp   #   SMTP/POP3 协议客户端演示程序
-│   ├── users.txt         #   默认账号 bob、alice（密码 123456）
+│   ├── users.txt         #   默认账号 bob、alice（密码 123456，落盘为 PBKDF2-SHA256 哈希）
 │   ├── setup_portproxy.bat # Windows 局域网/ZeroTier 访问端口转发脚本
 │   ├── keys/             #   密钥（运行时生成，勿提交）：用户对称密钥 <用户>.key、
 │   │                     #   层1 服务器 RSA 密钥 server_public.pem / server_private.pem
@@ -126,7 +126,7 @@ make clean         # 清理全部产物
 | POP3 服务器 | POP3 | **1110** | 邮件收取入口 |
 | HTTP 服务器 | HTTP | **8080** | 浏览器唯一入口（Web 页面 + REST） |
 
-默认账号：`alice` / `bob`，密码均为 `123456`。账号存于 `MailServer/users.txt`（`用户名:密码` 每行一个），
+默认账号：`alice` / `bob`，密码均为 `123456`。账号存于 `MailServer/users.txt`（`用户名:PBKDF2-SHA256 哈希` 每行一个，旧版明文账号首次启动会自动迁移为哈希），
 网页注册的新账号即时生效，无需重启。
 
 ## 七、测试情况

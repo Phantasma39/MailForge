@@ -3,11 +3,13 @@
 
 #include "Pop3Server.h"
 #include "MailCrypto.h"
+#include "common/password.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cstring>
 #include <cctype>
+#include <cstdio>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -17,6 +19,7 @@
 // 构造函数：先让基类 Server 把端口存好，再准备账号表和收件根目录
 Pop3Server::Pop3Server(int port) : Server(port) {
     mkdir("./mailbox", 0755);   // 保证收件根目录存在（SmtpServer 那边也会建一次，幂等）
+    migrateLegacyPasswords();   // 旧版明文账号自动迁移为哈希
     loadAccounts();             // 读取 ./users.txt 账号表
 }
 
@@ -55,6 +58,59 @@ void Pop3Server::sendResponse(int fd, const std::string& response) {
 
 // 把 ./users.txt（格式：用户名:密码，一行一个，# 开头是注释）读进 accounts_
 // 文件不存在或里面一个有效账号都没有时，用内置默认账号兜底，保证第一次能跑起来
+void Pop3Server::migrateLegacyPasswords() {
+    std::ifstream in("./users.txt");
+    if (!in.is_open()) return;
+
+    std::vector<std::string> lines;
+    bool changed = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string t = line;
+        size_t b = t.find_first_not_of(" \t");
+        if (b == std::string::npos) { lines.push_back(line); continue; }
+        size_t e = t.find_last_not_of(" \t");
+        t = t.substr(b, e - b + 1);
+        if (t.empty() || t[0] == '#') { lines.push_back(line); continue; }
+
+        size_t colon = t.find(':');
+        if (colon == std::string::npos) { lines.push_back(line); continue; }
+        std::string user = t.substr(0, colon);
+        std::string stored = t.substr(colon + 1);
+        if (mail::IsHashedPassword(stored)) {
+            lines.push_back(user + ":" + stored);
+            continue;
+        }
+
+        // 旧版明文密码 -> PBKDF2-SHA256 哈希。
+        std::string hashed = mail::HashPassword(stored);
+        if (hashed.empty()) {
+            lines.push_back(line);   // 哈希失败时保留原行，避免把账号搞丢。
+            continue;
+        }
+        lines.push_back(user + ":" + hashed);
+        changed = true;
+    }
+    in.close();
+    if (!changed) return;
+
+    const std::string tmpPath = "./users.txt.tmp";
+    std::ofstream out(tmpPath, std::ios::trunc);
+    if (!out.is_open()) {
+        std::cerr << "[POP3] 无法写入临时账号文件，跳过密码迁移" << std::endl;
+        return;
+    }
+    for (const std::string& l : lines) out << l << "\n";
+    out.close();
+
+    if (std::rename(tmpPath.c_str(), "./users.txt") != 0) {
+        perror("[POP3] users.txt 哈希迁移失败");
+        std::remove(tmpPath.c_str());
+        return;
+    }
+    std::cout << "[POP3] 已有 users.txt 已自动迁移为 PBKDF2-SHA256 哈希格式" << std::endl;
+}
 void Pop3Server::loadAccounts() {
     std::lock_guard<std::mutex> lock(accountsMutex_);   // 重读账号表前先加锁（多线程）
     // 先塞内置默认账号（bob / alice，密码都是 123456，方便第一次运行直接测试）
@@ -127,12 +183,12 @@ bool Pop3Server::checkPassword(const std::string& userKey, const std::string& pa
     {
         std::lock_guard<std::mutex> lock(accountsMutex_);
         auto it = accounts_.find(userKey);
-        if (it != accounts_.end()) return it->second == pass;
+        if (it != accounts_.end()) return mail::VerifyPassword(pass, it->second);
     }
     loadAccounts();
     std::lock_guard<std::mutex> lock(accountsMutex_);
     auto it = accounts_.find(userKey);
-    return it != accounts_.end() && it->second == pass;
+    return it != accounts_.end() && mail::VerifyPassword(pass, it->second);
 }
 
 // 把登录名规范成"小写 + 只留 @ 前部分"：

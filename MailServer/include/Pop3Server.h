@@ -25,8 +25,8 @@
 //    这样就实现了 README 里说的"多邮箱账户隔离"。
 //
 //  账号密码：
-//    保存在 ./users.txt 里，一行一个「用户名:密码」（用户名也会按上面的规则规范化），
-//    文件不存在时会用内置默认账号兜底（见 loadAccounts）。
+//    保存在 ./users.txt 里，一行一个「用户名:密码哈希」；密码使用 PBKDF2-SHA256
+//    随机盐哈希存储，旧版明文账号会在启动时自动迁移。
 // ============================================================================
 #ifndef POP3_SERVER_H
 #define POP3_SERVER_H
@@ -83,6 +83,9 @@ private:
 
     // 加载 ./users.txt 里的账号表；文件不存在 / 内容为空时用内置默认账号兜底
     void loadAccounts();
+
+    // 把旧版明文 users.txt 原地迁移为 PBKDF2-SHA256 哈希格式（启动时执行一次）
+    void migrateLegacyPasswords();
 
     // 把用户输入的登录名规范成"小写 + 只留 @ 前部分"
     // （bob@example.com、Bob、bob 都会变成 bob，方便和目录名、账号表对上）

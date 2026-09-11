@@ -6,6 +6,7 @@
 #include "Pop3Client.h"
 #include "MailCrypto.h"
 #include "ThreadPool.h"
+#include "common/password.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -513,11 +514,14 @@ bool userExistsInFile(const std::string& user) {
     return false;
 }
 
-// 把 用户名:密码 追加写进 users.txt
+// 把 用户名:PBKDF2-SHA256 哈希 追加写进 users.txt。
+// 注意：这里绝不写明文密码。
 bool appendUserToFile(const std::string& user, const std::string& pass) {
+    std::string hashed = mail::HashPassword(pass);
+    if (hashed.empty()) return false;
     std::ofstream f("./users.txt", std::ios::app);
     if (!f) return false;
-    f << user << ":" << pass << "\n";
+    f << user << ":" << hashed << "\n";
     return f.good();
 }
 } // namespace
@@ -788,6 +792,8 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleRegister(req, resp);
     } else if (req.method == "POST" && req.path == "/api/login") {
         handleLogin(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/session") {
+        handleSession(req, resp);
     } else if (req.method == "POST" && req.path == "/api/logout") {
         handleLogout(req, resp);
     } else if (req.method == "POST" && req.path == "/api/send") {
@@ -851,8 +857,8 @@ void HttpServer::handleRegister(const HttpRequest& req, HttpResponse& resp) {
         resp.body = jsonResult(false, "缺少 user 或 pass 参数");
         return;
     }
-    if (pass.size() < 4) {
-        resp.body = jsonResult(false, "密码太短，至少 4 位");
+    if (pass.size() < 6) {
+        resp.body = jsonResult(false, "密码太短，至少 6 位");
         return;
     }
 
@@ -914,6 +920,16 @@ void HttpServer::handleLogin(const HttpRequest& req, HttpResponse& resp) {
 }
 
 // ==================== POST /api/logout ====================
+void HttpServer::handleSession(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+    resp.body = std::string("{\"ok\":true,\"user\":\"") +
+                jsonEscape(session.user) + "\"}";
+}
+
 void HttpServer::handleLogout(const HttpRequest& req, HttpResponse& resp) {
     std::string token = getParam(req, "token");
     if (token.empty()) {
