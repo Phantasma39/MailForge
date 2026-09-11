@@ -515,13 +515,12 @@ void Pop3Server::handleClient(int client_fd) {
             // 处理命令；返回 false 表示会话结束（QUIT）
             bool cont = processCommand(client_fd, line, st);
             if (!cont) {
-                close(client_fd);
-                return;   // 结束本线程，退出会话
+                return;   // 结束本会话，由线程池任务统一 close
             }
         }
         // 缓冲区里残留的"半行"留在 buf 里，等下一次 recv 拼完整
     }
 
-    close(client_fd);   // 双保险关闭（基类线程函数里也会 close 一次）
+    // 线程结束，由 Server 的线程池任务统一 close(client_fd)，避免重复关闭。
 }
 

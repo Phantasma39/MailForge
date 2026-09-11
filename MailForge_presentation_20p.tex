@@ -1,0 +1,866 @@
+% ============================================================================
+%  MailForge 课程设计汇报 Beamer 幻灯片
+%  编译方式（推荐 XeLaTeX）：xelatex MailForge_presentation.tex 连续两次
+%  显示讲者备注：在导言区打开 \setbeameroption{show notes}
+% ============================================================================
+\documentclass[aspectratio=169,10pt]{beamer}
+\usepackage[UTF8]{ctex}
+\usepackage{fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc,backgrounds}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usetheme{Madrid}
+\usecolortheme{whale}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{caption}[numbered]
+\setbeamertemplate{itemize items}[circle]
+\setbeamertemplate{enumerate items}[default]
+\setbeamertemplate{blocks}[rounded][shadow=false]
+\setbeamerfont{title}{size=\LARGE,series=\bfseries}
+\setbeamerfont{frametitle}{size=\large,series=\bfseries}
+\setbeamerfont{block title}{size=\small,series=\bfseries}\setbeamertemplate{footline}{
+  \leavevmode\hbox{%
+    \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.4ex,dp=1.2ex,center]{author in head/foot}%
+      \usebeamerfont{author in head/foot}\insertshortauthor
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.34\paperwidth,ht=2.4ex,dp=1.2ex,center]{title in head/foot}%
+      \usebeamerfont{title in head/foot}\insertshorttitle
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.4ex,dp=1.2ex,center]{date in head/foot}%
+      \usebeamerfont{date in head/foot}\insertframenumber{} / \inserttotalframenumber
+    \end{beamercolorbox}}%
+  \vskip0pt
+}
+\definecolor{MFBlue}{RGB}{20,60,120}
+\definecolor{MFAccent}{RGB}{0,120,180}
+\definecolor{MFGreen}{RGB}{30,130,80}
+\definecolor{MFRed}{RGB}{180,40,40}
+\definecolor{MFOrange}{RGB}{210,120,20}
+\definecolor{MFGray}{RGB}{245,247,250}
+\definecolor{MFDark}{RGB}{35,40,50}
+\setbeamercolor{structure}{fg=MFBlue}
+\setbeamercolor{title}{fg=white}
+\setbeamercolor{frametitle}{fg=white,bg=MFBlue}
+\setbeamercolor{block title}{fg=white,bg=MFBlue}
+\setbeamercolor{block body}{bg=MFGray}
+\setbeamercolor{alerted text}{fg=MFRed}
+\setbeamercolor{example text}{fg=MFGreen}
+\newcommand{\key}[1]{\textcolor{MFAccent}{\textbf{#1}}}
+\newcommand{\warn}[1]{\textcolor{MFRed}{\textbf{#1}}}
+\newcommand{\good}[1]{\textcolor{MFGreen}{\textbf{#1}}}
+\newcommand{\code}[1]{\texttt{\small\detokenize{#1}}}
+\lstdefinestyle{cppstyle}{
+  language=C++,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{MFBlue}\bfseries,
+  commentstyle=\color{MFGreen!80!black},
+  stringstyle=\color{MFRed!80!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=5pt,
+  frame=single,
+  rulecolor=\color{gray!40},
+  backgroundcolor=\color{MFGray},
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  tabsize=2,
+  xleftmargin=1.2em
+}
+\lstdefinestyle{protostyle}{
+  basicstyle=\ttfamily\scriptsize,
+  frame=single,
+  rulecolor=\color{gray!40},
+  backgroundcolor=\color{MFGray},
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  xleftmargin=1.2em
+}
+\title[MailForge]{MailForge 邮件服务器}
+\subtitle{SMTP + POP3 + Web + 两层端到端加密 \\ 课程设计汇报}
+\author[苏俊玮、王诗贺]{苏俊玮、王诗贺}
+\institute[计算机与网络课程设计]{计算机与网络课程设计 · 选题 18}
+\date{\today}
+
+\begin{document}
+
+% ============================== 1 封面 ==============================
+\begin{frame}
+  \titlepage
+  \vfill
+  \begin{center}
+    \small 原生 Socket $\cdot$ 手写 SMTP/POP3/HTTP $\cdot$ 自研 AES/ChaCha20 $\cdot$ 两层加密
+  \end{center}
+  \note{开场用一句话：MailForge 是从零实现的课程级邮件系统，协议、Web 和密码算法都尽量自己实现。}
+\end{frame}
+
+% ============================== 2 项目与需求 ==============================
+\begin{frame}{项目简介与课程需求映射}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{block}{MailForge 是什么}
+        \small
+        \begin{itemize}
+          \item 原生 Socket 手写 SMTP / POP3 / HTTP。
+          \item 多用户 Web 邮箱：注册、登录、收发、附件、已发送。
+          \item 邮件按 \code{.eml} 落盘，重启不丢。
+          \item 两层加密：Web RSA 信封 + 服务器内部/落盘自研 AES/ChaCha。
+          \item 内建协议演示终端与 100 封压测。
+        \end{itemize}
+      \end{block}
+      \begin{block}{运行约定}
+        \small
+        SMTP: 2525 \quad POP3: 1110 \quad HTTP: 8080 \\
+        默认账号：\code{alice/123456}，\code{bob/123456}
+      \end{block}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{block}{课程要求对照}
+        \small
+        \begin{tabular}{p{0.42\textwidth}p{0.48\textwidth}}
+          \toprule
+          要求 & 实现 \\
+          \midrule
+          SMTP 标准交互 & EHLO/MAIL/RCPT/DATA/QUIT \\
+          POP3 标准交互 & USER/PASS/STAT/LIST/RETR/DELE/QUIT \\
+          正文与附件 & MIME multipart + Base64 \\
+          传输加密 & 两层加密，算法可切换 \\
+          $\ge$ 2 种算法 & AES-256-CBC、ChaCha20 \\
+          时延/成功率 & 100 封压测，内建统计 \\
+          \bottomrule
+        \end{tabular}
+      \end{block}
+      \begin{alertblock}{汇报口径}
+        \small
+        协议正确性用 RFC 状态机和端到端测试证明；密码算法用 NIST/RFC 官方向量回归证明。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{这一页交代项目全貌和验收对照，不要展开代码。}
+\end{frame}
+% ============================== 3 总体架构 ==============================
+\begin{frame}{总体架构：三服务器 + 两客户端 + 两加密层}
+  \centering
+  \begin{tikzpicture}[
+      node distance=0.7cm and 0.9cm,
+      box/.style={draw, rounded corners, thick, align=center, minimum height=0.7cm, minimum width=2.0cm, font=\scriptsize},
+      svr/.style={box, fill=MFBlue!8},
+      cli/.style={box, fill=MFGreen!10},
+      store/.style={box, fill=MFOrange!12},
+      layer1/.style={draw=MFRed, dashed, rounded corners, inner sep=5pt},
+      layer2/.style={draw=MFBlue, dashed, rounded corners, inner sep=5pt},
+      arrow/.style={-{Latex[length=2mm]}, thick}
+    ]
+    \node[box, fill=MFGray] (browser) {浏览器\\WebCrypto};
+    \node[svr, right=of browser] (http) {HttpServer\\:8080};
+    \node[cli, right=of http] (clients) {SmtpClient\\Pop3Client};
+    \node[svr, right=of clients] (mail) {SMTP :2525\\POP3 :1110};
+    \node[store, below=0.6cm of mail] (mailbox) {mailbox/<user>/*.eml\\sent/<user>/*.eml};
+    \node[store, below=0.6cm of clients] (keys) {keys/\\<user>.key\\server\_*.pem};
+    \draw[arrow] (browser) -- node[above,font=\tiny]{HTTP/REST} (http);
+    \draw[arrow] (http) -- (clients);
+    \draw[arrow] (clients) -- node[above,font=\tiny]{SMTP/POP3} (mail);
+    \draw[arrow] (mail) -- (mailbox);
+    \draw[arrow] (http) -- (keys);
+    \draw[arrow] (mail) -- (keys);
+    \begin{scope}[on background layer]
+      \node[layer1, fit=(browser)(http)] {};
+      \node[layer2, fit=(http)(mail)(mailbox)(keys)] {};
+    \end{scope}
+    \node[MFRed, font=\tiny] at ($(browser)!0.5!(http)+(0,1.05)$) {层1：RSA 信封};
+    \node[MFBlue, font=\tiny] at ($(http)!0.5!(mail)+(0,1.05)$) {层2：自研对称加密};
+  \end{tikzpicture}
+  \vspace{0.3em}
+  \begin{itemize}
+    \small
+    \item 三个服务器各占一个线程 accept；每个连接再派发一个工作线程。
+    \item HTTP 后端不直接写文件，而是作为 SMTP/POP3 客户端走本机协议，保证与外部协议客户端一致。
+  \end{itemize}
+  \note{重点讲两个虚线框：层1保护浏览器到服务器，层2保护服务器内部与磁盘。}
+\end{frame}
+
+% ============================== 4 目录与模块 ==============================
+\begin{frame}[fragile]{目录结构与模块职责}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[style=protostyle,basicstyle=\ttfamily\tiny]
+MailForge/
++-- MailServer/
+|   +-- Server.*       网络基类
+|   +-- SmtpServer.*   SMTP 服务端
+|   +-- Pop3Server.*   POP3 服务端
+|   +-- SmtpClient.*   内部发信
+|   +-- Pop3Client.*   内部收信
+|   +-- HttpServer.*   Web 后端
+|   +-- MailCrypto.*   加密统一入口
+|   +-- web/           前端页面
++-- crypto/
+|   +-- aes.* chacha20.*
+|   +-- rsa.* random.*
+|   +-- tests/ docs/
++-- common/
+    +-- base64 / logger / file_util / socket
+      \end{lstlisting}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{分层设计}
+        \small
+        \begin{enumerate}
+          \item 公共层：Socket、Base64、日志、文件工具。
+          \item 协议层：SMTP/POP3 服务端与客户端状态机。
+          \item Web 层：HTTP 解析、REST、会话、MIME、压测。
+          \item 密码层：MailCrypto 入口；自研 AES/ChaCha + OpenSSL RSA。
+          \item 展示层：Web 邮箱、协议演示终端。
+        \end{enumerate}
+      \end{block}
+      \begin{block}{关键解耦}
+        \small
+        SMTP/POP3 服务器只处理原文，不感知加密；加密挂在 HTTP 发送前和读取后。
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{这一页回答代码在哪里。重点强调协议层与密码层解耦。}
+\end{frame}
+% ============================== 5 SMTP 原理 ==============================
+\begin{frame}[fragile]{SMTP 原理与标准交互}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{itemize}
+        \item SMTP 是基于 TCP 的文本命令/响应协议，服务器问候码 220。
+        \item 核心流程：
+          \begin{enumerate}
+            \item \code{EHLO/HELO}；
+            \item \code{MAIL FROM:<...>} 信封发件人；
+            \item \code{RCPT TO:<...>} 信封收件人；
+            \item \code{DATA} 开始传正文，单独一行点结束；
+            \item \code{QUIT} 退出。
+          \end{enumerate}
+        \item 2xx 成功、3xx 中间态、4xx 暂时失败、5xx 永久失败。
+        \item 本项目实现核心命令，未实现 AUTH、STARTTLS、多收件人队列。
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{block}{SMTP 对话}
+        \tiny
+        \begin{lstlisting}[style=protostyle,basicstyle=\ttfamily\tiny]
+S: 220 MyMailServer ESMTP ready
+C: EHLO client
+S: 250 Hello client
+C: MAIL FROM:<alice@example.com>
+S: 250 OK
+C: RCPT TO:<bob@example.com>
+S: 250 OK
+C: DATA
+S: 354 End data with <CR><LF>.<CR><LF>
+C: Subject: Hello
+C:
+C: body
+C: .
+S: 250 Message accepted
+C: QUIT
+S: 221 Bye
+        \end{lstlisting}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{强调信封地址与邮件头部 From/To 是两个概念。}
+\end{frame}
+
+% ============================== 6 SMTP 实现与落盘 ==============================
+\begin{frame}[fragile]{SMTP 状态机、点填充与落盘}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \begin{tikzpicture}[
+          node distance=0.5cm and 0.6cm,
+          st/.style={draw, rounded corners, thick, fill=MFBlue!8, align=center, minimum height=0.6cm, font=\tiny},
+          arrow/.style={-{Latex[length=1.5mm]}, thick}
+        ]
+        \node[st] (a) {220};
+        \node[st, right=of a] (b) {EHLO};
+        \node[st, right=of b] (c) {MAIL};
+        \node[st, right=of c] (d) {RCPT};
+        \node[st, below=of c] (e) {DATA/354};
+        \node[st, right=of e] (f) {单独点\\保存};
+        \draw[arrow] (a)--(b); \draw[arrow] (b)--(c); \draw[arrow] (c)--(d);
+        \draw[arrow] (d)|-(e); \draw[arrow] (e)--(f);
+      \end{tikzpicture}
+      \begin{itemize}
+        \small
+        \item \code{dataMode} 区分命令与正文。
+        \item \code{SmtpMail} 跨命令保存会话。
+        \item 点填充：正文行以点开头写成两个点，服务器还原。
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \begin{block}{落盘与多用户隔离}
+        \small
+        \begin{enumerate}
+          \item 从收件人取 \code{@} 前部分，转小写；
+          \item 存入 \code{mailbox/<user>/时间戳_随机数.eml}；
+          \item 补齐缺失的 Date/From/To/Subject；
+          \item 头部区 + 空行 + 正文写入文件。
+        \end{enumerate}
+      \end{block}
+      \begin{alertblock}{改进点}
+        \small
+        \code{rand()} 不是线程安全，文件名可能碰撞；应使用 CSPRNG 或原子计数。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{落盘采用标准 .eml，协议客户端和 Web 后端读写同一份数据。}
+\end{frame}
+% ============================== 7 POP3 原理 ==============================
+\begin{frame}[fragile]{POP3 原理：三阶段状态机与延迟删除}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{itemize}
+        \item 服务器先回 \code{+OK}，出错回 \code{-ERR}。
+        \item 三阶段：
+          \begin{enumerate}
+            \item AUTHORIZATION：\code{USER / PASS}；
+            \item TRANSACTION：\code{STAT / LIST / RETR / DELE / RSET / NOOP}；
+            \item UPDATE：\code{QUIT} 时真正删除被标记邮件。
+          \end{enumerate}
+        \item \code{DELE} 只打标记，中途断开不会误删。
+        \item 多行响应用单独一行点结束，正文点开头行同样点填充。
+        \item 支持新注册账号即时登录：内存表没有则重读 \code{users.txt}。
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{block}{POP3 对话}
+        \tiny
+        \begin{lstlisting}[style=protostyle,basicstyle=\ttfamily\tiny]
+S: +OK MailForge POP3 ready
+C: USER bob
+S: +OK User bob known
+C: PASS 123456
+S: +OK mailbox ready, 2 message(s)
+C: STAT
+S: +OK 2 12345
+C: LIST
+S: +OK 2 message(s)
+S: 1 6000
+S: 2 6345
+S: .
+C: RETR 1
+S: +OK 6000 octets
+... mail ...
+S: .
+C: DELE 1
+S: +OK message 1 deleted
+C: QUIT
+S: +OK signing off
+        \end{lstlisting}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{重点讲 DELE 加 QUIT 的延迟删除语义。}
+\end{frame}
+
+% ============================== 8 POP3 实现 ==============================
+\begin{frame}{POP3 实现：快照 + 会话状态}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{关键结构}
+        \small
+        \begin{itemize}
+          \item \code{Pop3State}：认证标志、用户名、\code{userKey}、邮件快照。
+          \item \code{Pop3Mail}：路径、大小、\code{deleted} 标记。
+          \item 登录成功后扫描 \code{mailbox/<user>/*.eml}，排序生成稳定编号。
+        \end{itemize}
+      \end{block}
+      \begin{block}{认证与热加载}
+        \small
+        \code{normalizeUser()} 统一小写并去掉域名；\code{isUserKnown/checkPassword} 自动重读账号文件；登录成功同时 \code{ensureUserKey()}。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}
+        \item \code{sendMailContent()} 逐行读文件，处理换行与点填充，不一次性载入大邮件。
+        \item \code{QUIT} 时才 \code{unlink()} 被标记文件。
+        \item HTTP 后端调用 \code{Pop3Client}，与外部邮件客户端同一套协议。
+      \end{itemize}
+      \begin{alertblock}{改进点}
+        \small
+        未实现 \code{UIDL/TOP/APOP}；并发删除无保护；认证与传输均为明文。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{快照加标记：会话开始时读列表，DELE 只改内存标记，QUIT 扫描删除。}
+\end{frame}
+% ============================== 9 Server 与 HTTP ==============================
+\begin{frame}[fragile]{网络基类与 Web 后端}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Server 基类}
+        \small
+        \code{socket -> bind -> listen -> accept}，每个连接一个线程，子类实现 \code{handleClient}。SMTP/POP3/HTTP 共用这一套骨架。
+      \end{block}
+      \begin{lstlisting}[style=cppstyle,basicstyle=\ttfamily\tiny]
+class Server {
+protected:
+  virtual void handleClient(int fd) = 0;
+};
+      \end{lstlisting}
+      \begin{alertblock}{改进点}
+        \small
+        一连接一线程、\code{detach()}、无优雅退出；建议线程池 / epoll / jthread。
+      \end{alertblock}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \begin{block}{HTTP 后端}
+        \small
+        \begin{itemize}
+          \item 逐行解析请求行、查询串、头部、\code{Content-Length} body。
+          \item POST 表单按 \code{a=b\&c=d} 解析并 URL 解码。
+          \item 响应固定 \code{Connection: close}。
+          \item \code{/api/login} 用 POP3 试登录，成功生成 token 存入会话表。
+        \end{itemize}
+      \end{block}
+      \begin{lstlisting}[style=cppstyle,basicstyle=\ttfamily\tiny]
+void HttpServer::handleClient(int fd) {
+  HttpRequest req; HttpResponse resp;
+  if (!readRequest(fd, req)) return;
+  route(req, resp);
+  sendHttp(fd, resp);
+}
+      \end{lstlisting}
+    \end{column}
+  \end{columns}
+  \note{HTTP 是最小可用实现；强调它只是浏览器的翻译官，真正收发仍走 SMTP/POP3。}
+\end{frame}
+
+% ============================== 10 REST API 与 MIME ==============================
+\begin{frame}{REST API、MIME 附件与统一 .eml 存储}
+  \small
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{主要接口}
+        \begin{tabular}{lp{0.52\textwidth}}
+          \toprule
+          路径 & 功能 \\
+          \midrule
+          \code{/api/register} & 注册 \\
+          \code{/api/login} & POP3 验证 + token \\
+          \code{/api/send} & 发信；可选 AES/ChaCha；可选 RSA 信封 \\
+          \code{/api/inbox} & POP3 LIST + RETR \\
+          \code{/api/mail?n=} & 读信、自动解密、解析附件 \\
+          \code{/api/attachment} & 下载附件；\code{web=1} 走信封 \\
+          \code{/api/delete} & DELE + QUIT 删除 \\
+          \code{/api/sent} & 已发送列表 / 阅读 / 附件 \\
+          \code{/api/benchmark} & 100 封压测：plain/aes/chacha/all \\
+          \code{/api/webkey} & 下发服务器 RSA 公钥 \\
+          \code{/api/webpub} & 上传浏览器 RSA 公钥 \\
+          \bottomrule
+        \end{tabular}
+      \end{block}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \begin{block}{MIME 附件}
+        \small
+        \begin{itemize}
+          \item 生成随机 boundary，组装 \code{multipart/mixed}。
+          \item 附件段使用 Base64。
+          \item 加密时整个 multipart 先整体加密，再作为正文发送。
+          \item 下载时先解密邮件，再解析 MIME，最后 Base64 解码。
+        \end{itemize}
+      \end{block}
+      \begin{block}{统一存储}
+        \small
+        SMTP 投递、POP3 读取、Web 收发围绕同一份 \code{.eml}；用户目录隔离，重启不丢。
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{API 表不逐条念，重点标发送、收件、附件、压测、Web RSA 交换。}
+\end{frame}
+% ============================== 11 两层加密 ==============================
+\begin{frame}{两层加密模型：信任边界不同}
+  \centering
+  \begin{tikzpicture}[
+      node distance=0.5cm and 1.0cm,
+      box/.style={draw, rounded corners, thick, align=center, minimum height=0.8cm, minimum width=2.1cm, font=\small},
+      arrow/.style={-{Latex[length=2.2mm]}, thick}
+    ]
+    \node[box, fill=MFGray] (browser) {浏览器\\WebCrypto};
+    \node[box, fill=MFRed!12, right=1.2cm of browser] (http) {HTTP 服务器\\OpenSSL};
+    \node[box, fill=MFGreen!12, right=1.2cm of http] (proto) {SMTP/POP3\\服务器};
+    \node[box, fill=MFOrange!15, right=1.2cm of proto] (disk) {磁盘 .eml\\密文};
+    \draw[arrow, MFRed, line width=1pt] (browser) -- node[above,font=\tiny]{层1：AES-GCM + RSA-OAEP} (http);
+    \draw[arrow, MFBlue, line width=1pt] (http) -- node[above,font=\tiny]{层2：AES-CBC / ChaCha20} (proto);
+    \draw[arrow, MFBlue, line width=1pt] (proto) -- (disk);
+  \end{tikzpicture}
+  \vspace{0.6em}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{层1：浏览器到服务器}
+        \small
+        \begin{itemize}
+          \item 本机无 TLS 时保护 Web 表单、收件箱、附件。
+          \item AES-256-GCM 加密内容，RSA-OAEP-2048 包装会话密钥。
+          \item 浏览器 WebCrypto，服务器 OpenSSL EVP。
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{层2：服务器内部与磁盘}
+        \small
+        \begin{itemize}
+          \item 邮件正文和附件整体加密后再走 SMTP/POP3/落盘。
+          \item AES-256-CBC 或 ChaCha20 可切换。
+          \item 纯 C++ 自研，不依赖 OpenSSL。
+          \item 发送副本用收件人密钥，已发送副本用发件人密钥。
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{这是创新点核心。B/S 架构下服务器最终能解密，因此是分层机密性，不是严格端到端。}
+\end{frame}
+
+% ============================== 12 层1 RSA ==============================
+\begin{frame}[fragile]{层1：RSA 数字信封与 WebCrypto 互通}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{发送：浏览器到服务器}
+        \small
+        \begin{enumerate}
+          \item 浏览器生成一次性 AES-256-GCM 会话密钥；
+          \item 用服务器 RSA 公钥做 RSA-OAEP(SHA-256) 封装；
+          \item 表单用 AES-GCM 加密，末尾带 16B tag；
+          \item 服务器用私钥拆封，再解 GCM。
+        \end{enumerate}
+      \end{block}
+      \begin{block}{反向：服务器到浏览器}
+        \small
+        浏览器生成 RSA-2048 密钥对，公钥上传 \code{/api/webpub}；服务器读信、附件、压测结果用该公钥封装返回。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[style=protostyle,basicstyle=\ttfamily\tiny]
+k=<Base64 RSA-OAEP-SHA256(32B session key)>
+|iv=<Base64 12B GCM IV>
+|ct=<Base64 AES-GCM(ciphertext || 16B tag)>
+      \end{lstlisting}
+      \begin{itemize}
+        \small
+        \item WebCrypto 导入 SPKI 公钥；JWK 私钥存 localStorage。
+        \item 服务器 OpenSSL 读写 PEM，双方标准算法互通。
+        \item WebCrypto 不可用时前端降级明文 HTTP。
+      \end{itemize}
+      \begin{alertblock}{改进点}
+        \small
+        信封无签名、无防重放；浏览器私钥存 localStorage 只适合演示。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{讲混合加密：RSA 只包装会话密钥，AES-GCM 加密内容并提供完整性。}
+\end{frame}
+% ============================== 13 层2 算法 ==============================
+\begin{frame}{层2：自研 AES-256-CBC 与 ChaCha20}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{AES-256-CBC}
+        \small
+        \begin{itemize}
+          \item 分组密码：块 16B，密钥 32B，14 轮。
+          \item CBC 链接，PKCS\#7 填充并校验。
+          \item 每封邮件随机 16B IV。
+          \item 线格式：\code{MailForge::ENC::AES:: + Base64(IV || 密文)}。
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{ChaCha20}
+        \small
+        \begin{itemize}
+          \item 流密码：密钥 32B，nonce 12B，64B 密钥流块。
+          \item ARX：加法、异或、循环移位，无查表。
+          \item 20 轮；每封邮件随机 nonce。
+          \item 线格式：\code{MailForge::ENC::CHA:: + Base64(nonce || 密文)}。
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.4em}
+  \begin{alertblock}{工程约定与安全边界}
+    \small
+    真实 Subject + 空行 + 正文/附件 multipart 整体加密；头部只留占位 Subject 与 \code{X-MailForge-Crypto}。AES-CBC 和 ChaCha20 本身都不提供完整性认证，建议升级为 AES-GCM 或 ChaCha20-Poly1305。
+  \end{alertblock}
+  \note{对比分组密码和流密码。主动指出 CBC/ChaCha20 无 MAC 是最大密码学改进点。}
+\end{frame}
+
+% ============================== 14 AES 原理与实现 ==============================
+\begin{frame}[fragile]{AES-256 原理与实现要点}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{四个变换}
+        \small
+        \begin{enumerate}
+          \item SubBytes：S 盒非线性替换；
+          \item ShiftRows：按行循环左移；
+          \item MixColumns：GF(2$^8$) 上乘固定矩阵；
+          \item AddRoundKey：与轮密钥异或。
+        \end{enumerate}
+        AES-256 密钥扩展为 15 个轮密钥；最后一轮不做 MixColumns。
+      \end{block}
+      \begin{block}{S 盒不是抄表}
+        \small
+        在 GF(2$^8$) 中求逆 $a^{-1}=a^{254}$，再做仿射变换；逆 S 盒由正向映射反推。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{lstlisting}[style=cppstyle,basicstyle=\ttfamily\tiny]
+bool Aes::Encrypt(key, iv, plaintext, ciphertext) {
+  size_t pad = 16 - (plaintext.size() % 16);
+  // PKCS#7 填充
+  ExpandKey(key.data(), rk.data());
+  for each block:
+    blk = plaintext_block ^ prev;
+    EncryptBlock(rk, blk, out);
+    prev = out;
+}
+      \end{lstlisting}
+      \begin{block}{验证与改进}
+        \small
+        使用 NIST SP 800-38A F.2.3 官方向量回归。CBC 只提供机密性，应升级为 AES-GCM 或 Encrypt-then-MAC。
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{强调自研有官方向量验证，不是自己加密自己解密。}
+\end{frame}
+% ============================== 15 ChaCha 原理与实现 ==============================
+\begin{frame}[fragile]{ChaCha20 原理与实现要点}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{block}{状态与轮函数}
+        \small
+        16 个 32 位字：4 常量 + 8 密钥字 + 1 计数器 + 3 nonce 字。\\
+        每轮做列轮与对角轮的 QuarterRound：
+        \[
+        a+=b;\ d\oplus=a;\ d\lll 16;\quad
+        c+=d;\ b\oplus=c;\ b\lll 12
+        \]
+        共 10 次双轮，最后累加初始状态并输出 64B 密钥流。
+      \end{block}
+      \begin{block}{验证}
+        \small
+        使用 RFC 8439 §2.3.2 官方向量验证 \code{Block()}。
+      \end{block}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{lstlisting}[style=cppstyle,basicstyle=\ttfamily\tiny]
+void ChaCha20::Block(key, nonce, counter, out) {
+  uint32_t state[16], work[16];
+  state[0..3] = constants;
+  state[4..11] = key words;
+  state[12] = counter;
+  state[13..15] = nonce words;
+  for (int round = 0; round < 10; ++round) {
+    // column + diagonal QuarterRound
+  }
+  for (int i = 0; i < 16; ++i)
+    Store32LE(work[i] + state[i], out + 4*i);
+}
+      \end{lstlisting}
+      \begin{alertblock}{改进点}
+        \small
+        流密码无完整性认证，当前靠解密后是否以 \code{Subject:} 开头兜底；应使用 ChaCha20-Poly1305，且同一密钥下 nonce 绝不能重复。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{ChaCha20 的优势是无查表、软件实现友好；缺点是当前没有 Poly1305。}
+\end{frame}
+
+% ============================== 16 密钥与挂钩 ==============================
+\begin{frame}{密钥管理与加解密挂钩点}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{密钥文件}
+        \small
+        \begin{itemize}
+          \item 每账号 \code{keys/<user>.key}：32B 随机密钥；
+          \item 首次使用自动生成；
+          \item 用户名规范化：取 \code{@} 前、转小写；
+          \item 全局互斥锁保护查文件加写文件。
+        \end{itemize}
+      \end{block}
+      \begin{block}{服务器 RSA 密钥}
+        \small
+        \code{keys/server_public.pem} / \code{server_private.pem}，首次启动自动生成。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{加解密挂钩点}
+        \small
+        \begin{enumerate}
+          \item \code{handleSend()}：用收件人密钥加密载荷；
+          \item \code{decodeMail()}：按魔数识别算法，用查看者密钥解密；
+          \item 已发送副本：用发件人密钥再加密一份；
+          \item 附件下载：先解密邮件，再解析 MIME，再 Base64 解码。
+        \end{enumerate}
+      \end{block}
+      \begin{alertblock}{改进点}
+        \small
+        密钥明文存盘、无 KDF、无权限控制；建议主密钥派生、OS keyring、文件权限 0600。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{零配置密钥是亮点，但安全级别是演示级。真实系统不能裸存对称密钥。}
+\end{frame}
+% ============================== 17 端到端与测试 ==============================
+\begin{frame}{端到端数据流与测试结果}
+  \centering
+  \begin{tikzpicture}[
+      node distance=0.35cm,
+      flow/.style={draw, rounded corners, thick, fill=MFGray, align=center, minimum height=0.6cm, text width=2.1cm, font=\tiny},
+      arrow/.style={-{Latex[length=1.8mm]}, thick}
+    ]
+    \node[flow, fill=MFRed!10] (s1) {浏览器附件表单};
+    \node[flow, fill=MFRed!10, right=of s1] (s2) {层1 AES-GCM\\+ RSA-OAEP};
+    \node[flow, fill=MFBlue!10, right=of s2] (s3) {HTTP 解信封};
+    \node[flow, fill=MFBlue!10, right=of s3] (s4) {MIME multipart};
+    \node[flow, fill=MFBlue!10, below=of s4] (s5) {层2 AES/ChaCha};
+    \node[flow, fill=MFGreen!10, left=of s5] (s6) {SMTP / .eml 密文};
+    \node[flow, fill=MFGreen!10, left=of s6] (s7) {POP3 RETR};
+    \node[flow, fill=MFBlue!10, left=of s7] (s8) {层2 解密 / MIME};
+    \node[flow, fill=MFRed!10, below=of s8] (s9) {层1 信封返回};
+    \draw[arrow] (s1)--(s2); \draw[arrow] (s2)--(s3); \draw[arrow] (s3)--(s4);
+    \draw[arrow] (s4)--(s5); \draw[arrow] (s5)--(s6); \draw[arrow] (s6)--(s7);
+    \draw[arrow] (s7)--(s8); \draw[arrow] (s8)--(s9);
+  \end{tikzpicture}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{正确性测试}
+        \small
+        \begin{itemize}
+          \item AES-256-CBC：NIST SP 800-38A F.2.3。
+          \item ChaCha20：RFC 8439 §2.3.2。
+          \item RSA 信封：Seal/Open 双向、篡改和错密钥拒绝。
+          \item 协议端到端：SMTP 发信 -> 落盘 -> POP3 收信。
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{性能压测}
+        \small
+        每模式 100 封约 1MB 邮件：发送 100/100，丢包率 0\%，加密邮件解密还原 100/100；AES 平均约 100ms，ChaCha20 约 60ms，远低于 2s。
+      \end{block}
+      \begin{alertblock}{注意}
+        \small
+        以上为本地环回演示数据；真实网络评测应补充公网、并发、P95/P99 等指标。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{重点讲官方向量和端到端闭环，性能数据说明本地环回即可。}
+\end{frame}
+
+% ============================== 18 创新点 ==============================
+\begin{frame}{创新点总结}
+  \begin{columns}[T]
+    \begin{column}{0.50\textwidth}
+      \begin{block}{密码学创新}
+        \small
+        \begin{enumerate}
+          \item 两层加密模型：Web 链路与服务器内部/落盘分别保护。
+          \item 纯 C++ 自研 AES-256-CBC 与 ChaCha20，过 NIST/RFC 官方向量。
+          \item WebCrypto 与 OpenSSL 互通，标准线格式。
+          \item 加密与协议解耦，SMTP/POP3 对密文透明。
+        \end{enumerate}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{系统工程创新}
+        \small
+        \begin{enumerate}
+          \setcounter{enumi}{4}
+          \item 协议、Web、存储统一 \code{.eml}，不绕开协议。
+          \item 浏览器协议演示终端 + 100 封压测 + 自动清理。
+          \item 零配置密钥：首次使用自动生成。
+          \item 已发送副本用发件人密钥再加密，双方都能读。
+        \end{enumerate}
+      \end{block}
+      \begin{alertblock}{一句话}
+        \small
+        既展示了协议状态机，又展示了密码算法内部结构，并且都有可运行、可验证的闭环。
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \note{创新点不需要每个都展开，重点突出两层加密、自研算法、WebCrypto 互通。}
+\end{frame}
+% ============================== 19 改进方向 ==============================
+\begin{frame}{还可以修改的地方：按优先级}
+  \scriptsize
+  \renewcommand{\arraystretch}{0.92}
+  \begin{table}
+    \centering
+    \begin{tabular}{p{0.14\textwidth}p{0.44\textwidth}p{0.23\textwidth}p{0.10\textwidth}}
+      \toprule
+      类别 & 问题 & 建议 & 优先级 \\
+      \midrule
+      安全 & 密码明文、会话无过期 & 加盐哈希、会话 TTL、CSPRNG token & P0 \\
+      安全 & 无 TLS & STARTTLS / POP3S / HTTPS & P0 \\
+      密码 & CBC/ChaCha20 无完整性认证 & AES-GCM / ChaCha20-Poly1305 / EtM & P0 \\
+      密码 & RSA 信封无签名、无防重放 & 签名 + nonce + 时间戳 & P0 \\
+      架构 & 一连接一线程、detach、邮件全量入内存 & 线程池 / epoll / 流式分块加密 & P1 \\
+      协议 & 无 AUTH / STARTTLS / 多收件人 & 补齐 SMTP 扩展、UIDL/TOP、IMAP & P1 \\
+      工程 & 无配置、无数据库、无日志轮转 & 配置化、SQLite、统一日志 & P1 \\
+      功能 & 无搜索/分页/回复/转发/HTML 邮件 & 按需求逐步扩展 & P2 \\
+      测试 & 缺少模糊、并发、公网评测 & 协议模糊 + CI + P95/P99 & P1 \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+  \vspace{0.2em}
+  \begin{center}
+    \small 下一步三件事：升级 AEAD、密码哈希与 STARTTLS、线程池与流式加解密。
+  \end{center}
+  \note{诚实讲不足是加分项。优先讲 P0 安全类，再讲架构和测试。}
+\end{frame}
+
+% ============================== 20 总结与问答 ==============================
+\begin{frame}{总结与答辩准备}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{总结}
+        \small
+        \begin{itemize}
+          \item 从零手写 SMTP、POP3、HTTP。
+          \item 多用户 Web 邮箱、MIME 附件、\code{.eml} 持久化。
+          \item 两层加密：RSA 信封 + 自研 AES/ChaCha。
+          \item 官方向量、端到端、100 封压测验证。
+        \end{itemize}
+      \end{block}
+      \begin{block}{核心收获}
+        \small
+        协议要处理粘包/半包、点填充；密码算法要用官方向量证明；加密要按信任边界分层；安全加固与工程化同样重要。
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{高频问答}
+        \small
+        \begin{itemize}
+          \item 粘包/半包：缓冲区按换行拆行，半行留到下次。
+          \item POP3 删除：DELE 只标记，QUIT 才真正删除。
+          \item 为什么两层：浏览器链路和服务器内部/磁盘信任边界不同。
+          \item 自研算法安全吗：教学验证用，生产应用审计过的 AEAD。
+          \item 中间人风险：GCM tag 防篡改，但信封缺签名/证书，仍需改进。
+        \end{itemize}
+      \end{block}
+      \begin{block}{谢谢}
+        \centering
+        MailForge：让邮件协议和安全算法都看得见、跑得通、验得过。
+      \end{block}
+    \end{column}
+  \end{columns}
+  \note{最后一页用于总结和提问。留出演示源码或 PDF 的时间。}
+\end{frame}
+
+\end{document}

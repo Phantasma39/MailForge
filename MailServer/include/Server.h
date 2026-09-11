@@ -5,6 +5,8 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <memory>
+#include "ThreadPool.h"
 
 
 class Server {
@@ -25,7 +27,8 @@ protected:
 private:
     int server_fd;
     int port;
-    std::atomic<bool> is_running; 
+    std::atomic<bool> is_running;
+    std::unique_ptr<ThreadPool> pool_; 
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
 };

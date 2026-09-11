@@ -297,6 +297,20 @@
             <option value="all">三种全跑（明文 + AES + ChaCha）</option>
           </select>
         </div>
+        <div class="field">
+          <label>客户端线程池并发数（建议 2 核机器先用 2 或 4）</label>
+          <select id="benchThreads">
+            <option value="1">1 线程（顺序发送）</option>
+            <option value="2">2 线程</option>
+            <option value="4" selected>4 线程</option>
+            <option value="8">8 线程</option>
+            <option value="16">16 线程</option>
+          </select>
+        </div>
+        <div class="field" style="display:flex;gap:10px;align-items:center">
+          <input type="checkbox" id="benchMulti" style="width:auto;margin:0">
+          <label style="margin:0">多账号发送：alice / bob 轮询作为发件人（SMTP 不校验发件账号）</label>
+        </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
           <label style="margin:0">层1：压测请求/结果走 Web↔服务器 RSA 信封（与发信一致，可关）</label>
@@ -763,14 +777,19 @@ async function runBench(){
   const msg  = $("benchMsg");
   const box  = $("benchResult");
   const mode = $("benchMode").value;
+  const threads = $("benchThreads").value;
+  const multi = $("benchMulti").checked ? "1" : "0";
   const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
   btn.disabled = true;
   box.style.display = "none";
   setMsg("benchMsg", "⏳ 压测进行中（" + (names[mode] || mode) +
+         "，" + threads + " 线程，多账号=" + (multi === "1" ? "开" : "关") +
          "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
   try{
     // 与发信一致：压测请求/结果可选走 Web↔服务器 RSA 信封（层1）
-    const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode),
+    const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode)
+                                 + "&threads=" + encodeURIComponent(threads)
+                                 + "&multi=" + encodeURIComponent(multi),
                                  null, $("benchRsa").checked);
     if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
     if (!j || !Array.isArray(j.modes)){
@@ -785,21 +804,23 @@ async function runBench(){
     let rows = "";
     for (const m of j.modes){
       const okStyle = m.lossRate > 0 ? "color:var(--err)" : "color:var(--ok)";
+      const senderText = (m.senders || []).length + " 账号";
       rows += "<tr><td>" + (nameOf[m.mode] || m.mode) + "</td>"
+            + "<td>" + (m.threads || 1) + " 线程<br><span class='muted'>" + senderText + "</span></td>"
             + "<td>" + m.smtpOk + " / " + m.count + "</td>"
             + "<td>" + m.received + "</td>"
             + "<td>" + (m.encrypted ? m.decryptOk : "—") + "</td>"
             + "<td style='" + okStyle + "'><b>" + m.lossRate + "%</b></td>"
             + "<td>" + m.avgLatencyMs.toFixed(1) + " ms</td>"
+            + "<td>" + (m.throughput || 0).toFixed(1) + " 封/s</td>"
             + "<td>" + (m.totalMs/1000).toFixed(1) + " s</td></tr>";
-    }
-    box.style.display = "";
+    }    box.style.display = "";
     box.innerHTML =
       "<p class='muted'>每模式发送 <b>" + j.modes[0].count + "</b> 封 × " + mb +
       " MB 邮件；测试邮件已自动清理，收件箱已还原。</p>" +
       "<table class='res'><tr>" +
-      "<th>模式</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>" +
-      "<th>丢包率</th><th>平均时延</th><th>该轮耗时</th></tr>" +
+      "<th>模式</th><th>并发/账号</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>" +
+      "<th>丢包率</th><th>平均时延</th><th>吞吐</th><th>该轮耗时</th></tr>" +
       rows + "</table>" +
       "<p class='muted'>总耗时 " + (j.totalMs/1000).toFixed(1) + " 秒</p>";
   }catch(e){

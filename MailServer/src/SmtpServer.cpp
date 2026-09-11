@@ -10,7 +10,13 @@
 #include <sys/stat.h>
 #include <ctime>
 #include <chrono>
+#include <atomic>
 #include <sys/socket.h> 
+
+namespace {
+// 线程池并发写邮件时，用原子序号保证文件名唯一（rand() 不是线程安全的）。
+std::atomic<unsigned long long> g_mailFileSeq{0};
+} // namespace
 
 SmtpServer::SmtpServer(int port):Server(port){      //初始化SmptServer类，同时创建文件夹来储存邮件，0755是权限，我也不是很理解
     mkdir("./mailbox",0755);
@@ -297,17 +303,14 @@ void SmtpServer::handleClient(int client_fd) {
             // processCommand 返回 false 表示会话结束（QUIT）
             bool cont = processCommand(client_fd, line, mail, dataMode);
             if (!cont) {
-                close(client_fd);   // 关闭客户端 socket
-                return;             // 结束本线程，退出会话
+                return;             // 结束本会话，由线程池任务统一 close
             }
         }
         // 注意：如果缓冲区里最后残留的是"半行"（还没有 \n），
         // 它会留在 buf 里等下一次 recv 拼完整，这就是行缓冲的意义
     }
 
-    // 线程结束，client_fd 关闭
-    // （Server 基类的线程函数里也会 close 一次，这里再 close 是双保险）
-    close(client_fd);
+    // 线程结束，由 Server 的线程池任务统一 close(client_fd)，避免重复关闭。
 }
 
 void SmtpServer::saveMail(const SmtpMail& mail) {
@@ -315,7 +318,8 @@ void SmtpServer::saveMail(const SmtpMail& mail) {
     // 因为服务器是多线程的，两个客户端可能同时发邮件，
     // 只用时间戳可能撞名，加上随机数（rand()）进一步降低冲突概率
     auto now = std::chrono::system_clock::now();
-    auto ts = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    auto tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    std::time_t ts = std::time(nullptr);   // 供 Date 头使用
 
     // ===================== 按收件人分目录投递（配合 POP3 多用户收信） =====================
     // 邮件不再平铺在 ./mailbox/ 根目录，而是投到 ./mailbox/<收件人@前面的部分>/
@@ -341,7 +345,8 @@ void SmtpServer::saveMail(const SmtpMail& mail) {
                   << "），邮件兜底保存到 ./mailbox/" << std::endl;
     }
 
-    std::string filename = dir + "/" + std::to_string(ts) + "_" + std::to_string(rand()) + ".eml";
+    const unsigned long long seq = ++g_mailFileSeq;
+    std::string filename = dir + "/" + std::to_string(tsMs) + "_" + std::to_string(seq) + ".eml";
 
     // 以"写模式"打开文件（ofstream 默认是覆盖写）
     std::ofstream file(filename);

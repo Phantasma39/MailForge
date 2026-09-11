@@ -62,7 +62,9 @@ bool Server::start(){
     }
 
     is_running=true;
-    std::cout << "[服务器] 已启动，监听端口 " << port << std::endl;
+    pool_ = std::make_unique<ThreadPool>(ThreadPool::DefaultThreads());
+    std::cout << "[服务器] 已启动，监听端口 " << port
+              << "，线程池 worker 数 " << pool_->workerCount() << std::endl;
 
     //主循环启动
 
@@ -87,16 +89,18 @@ bool Server::start(){
                   << ntohs(client_addr.sin_port) << std::endl;
 
 
-    //多线程这一块我还没有搞懂，后面可能用线程池吧
-        std::thread worker([this, client_fd]() {
+        // 交给线程池：worker 复用，避免每连接反复创建/销毁线程。
+        pool_->enqueue([this, client_fd]() {
             this->handleClient(client_fd);
-
             close(client_fd);
         });
-        worker.detach();
     }
 
-    //关闭服务器
+    //关闭服务器：先停 accept，再等待线程池中已接收的连接处理完。
+    if (pool_) {
+        pool_->stop();
+        pool_.reset();
+    }
     close(server_fd);
     std::cout << "[服务器] 已停止" << std::endl;
     return true;

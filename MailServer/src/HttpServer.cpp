@@ -5,6 +5,7 @@
 #include "SmtpClient.h"
 #include "Pop3Client.h"
 #include "MailCrypto.h"
+#include "ThreadPool.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -14,6 +15,7 @@
 #include <ctime>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -1516,13 +1518,13 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    const int kCount = 100;              // 每种模式连续发送 100 封
-    const size_t kFileBytes = 786432;    // 附件"原始文件"786KB → base64 后 >1MB
+    const int kCount = 100;              // 每种模式共发送 100 封
+    const size_t kFileBytes = 786432;    // 附件原始文件 786KB，Base64 后约 1MB
 
-    // 选择测试模式
+    // ---------- 压测模式：plain / aes / chacha / all ----------
     std::string modeParam = getParam(req, "encrypt");
     if (modeParam.empty() || modeParam == "0" || modeParam == "none") modeParam = "plain";
-    if (modeParam == "1") modeParam = "aes";   // 兼容旧参数
+    if (modeParam == "1") modeParam = "aes";
     std::vector<std::string> modes;
     if (modeParam == "all" || modeParam == "both") {
         modes = {"plain", "aes", "chacha"};
@@ -1533,15 +1535,74 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    std::string to   = session.user + "@example.com";
-    std::string from = to;
+    // ---------- 并发参数：threads=1/2/4/8/16；multi=1 开启多账号发送 ----------
+    int concurrency = atoi(getParam(req, "threads").c_str());
+    if (concurrency <= 0) concurrency = 1;
+    if (concurrency > 16) concurrency = 16;
+
+    const bool multiParam = (getParam(req, "multi") == "1" ||
+                             getParam(req, "multi") == "true" ||
+                             getParam(req, "multi") == "yes");
+
+    auto trim = [](std::string s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return std::string();
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
+    };
+
+    std::vector<std::string> senders;
+    auto addSender = [&](std::string s) {
+        s = trim(s);
+        if (s.empty()) return;
+        if (s.find('@') == std::string::npos) s += "@example.com";
+        // 限制为常见邮箱用户名字符，避免奇怪输入进入 SMTP 命令。
+        for (char c : s) {
+            if (!(std::isalnum((unsigned char)c) || c == '@' || c == '.' ||
+                  c == '_' || c == '-')) return;
+        }
+        if (std::find(senders.begin(), senders.end(), s) == senders.end()) {
+            senders.push_back(s);
+        }
+    };
+
+    const bool multi = multiParam || !getParam(req, "accounts").empty();
+    if (multi) {
+        // 默认使用当前账号 + alice + bob 作为多个发件账号。
+        addSender(session.user);
+        addSender("alice");
+        addSender("bob");
+    }
+    std::string accountsParam = getParam(req, "accounts");
+    if (!accountsParam.empty()) {
+        size_t pos = 0;
+        while (pos <= accountsParam.size()) {
+            size_t comma = accountsParam.find(',', pos);
+            std::string item = (comma == std::string::npos)
+                ? accountsParam.substr(pos) : accountsParam.substr(pos, comma - pos);
+            addSender(item);
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+    }
+    if (senders.empty()) addSender(session.user);
+    if (senders.empty()) senders.push_back(session.user + "@example.com");
+
+    std::string sendersJson = "[";
+    for (size_t i = 0; i < senders.size(); ++i) {
+        if (i) sendersJson += ",";
+        sendersJson += "\"" + jsonEscape(senders[i]) + "\"";
+    }
+    sendersJson += "]";
+
+    const std::string to = session.user + "@example.com";
 
     auto nowMs = []() -> long long {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
-    // 预检：账号能登录 POP3（后续每轮统计也依赖它）
+    // 预检：账号能登录 POP3（后续统计也依赖它）
     {
         Pop3Client pre(kMailServerIp, kPop3Port);
         if (!pre.login(session.user, session.pass)) {
@@ -1551,7 +1612,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         pre.quit();
     }
 
-    // 构造约 1MB 的"附件"邮件：786KB 文件 → base64 → MIME multipart
+    // 构造约 1MB 的附件邮件：786KB 文件 -> Base64 -> MIME multipart
     std::string fileContent(kFileBytes, 'Z');
     std::string fileB64 = MailCrypto::base64Encode(fileContent);
     std::string boundary = "MailForgeBench" + std::to_string((long)time(nullptr))
@@ -1561,9 +1622,9 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                             + boundary + "\"\r\n";
     std::string payload = makeMultipartText(boundary, "压测正文（带附件）",
                                             "[压测附件].bin", fileB64);
-    const size_t mailBytes = payload.size() + 400;   // 单封落盘估算，>1MB
+    const size_t mailBytes = payload.size() + 400;
 
-    // 单轮压测：mode = plain / aes / chacha。返回该轮 JSON 片段并打印日志。
+    // 单轮压测：mode = plain / aes / chacha
     auto runRound = [&](const std::string& mode) -> std::string {
         const bool isEnc = (mode != "plain");
         MailCrypto::CryptoAlgo algo =
@@ -1571,7 +1632,6 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             : (mode == "aes")  ? MailCrypto::ALGO_AES_CBC
             : MailCrypto::ALGO_NONE;
 
-        // 加密轮：准备本账号对称密钥（发给自己，收发用同一把）
         std::string symKey;
         const bool keyReady = !isEnc || MailCrypto::getUserKey(to, symKey);
 
@@ -1585,53 +1645,70 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             cnt.quit();
         }
 
-        // b) 连续发送 kCount 封并逐封计时
-        int smtpOk = 0, smtpFail = 0;
-        long long totalLatencyMs = 0;
-        const long long roundStart = nowMs();
-        std::cout << "[HTTP] 压测轮 " << mode << "：" << session.user << " 连发 "
-                  << kCount << " 封约 " << (mailBytes / 1024) << "KB 邮件..."
-                  << std::endl;
+        // b) 用客户端线程池并发发送 100 封
+        std::atomic<int> smtpOk{0};
+        std::atomic<int> smtpFail{0};
+        std::atomic<long long> totalLatencyMs{0};
+        std::mutex logMutex;
 
+        const long long sendStart = nowMs();
+        std::cout << "[HTTP] 压测轮 " << mode << "：线程数 " << concurrency
+                  << "，发件账号数 " << senders.size() << "，共 " << kCount
+                  << " 封，约 " << (mailBytes / 1024) << "KB/封" << std::endl;
+
+        ThreadPool benchPool(static_cast<std::size_t>(concurrency));
         for (int i = 0; i < kCount; ++i) {
-            long long t0 = nowMs();
-            std::string subject = "[压测] 第 " + std::to_string(i + 1)
-                                + "/" + std::to_string(kCount) + " 封";
-            std::string raw;
-            if (!isEnc) {
-                raw = "From: " + from + "\r\n"
-                      "To: " + to + "\r\n"
-                      "Subject: " + subject + "\r\n"
-                      + mimeHeaders + "\r\n" + payload;
-            } else {
-                // 加密轮：真实主题+正文(含附件)整体加密后再进 SMTP，落盘只有密文
-                std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
-                std::string cipher =
-                    keyReady ? MailCrypto::encryptPayload(inner, symKey, algo) : "";
-                if (cipher.empty()) {
-                    ++smtpFail;
-                    std::cerr << "[HTTP] 第" << (i + 1) << "封加密失败("
-                              << mode << ")" << std::endl;
-                    continue;
-                }
-                raw = "From: " + from + "\r\n"
-                      "To: " + to + "\r\n"
-                      "Subject: [加密邮件]\r\n"
-                      "X-MailForge-Crypto: " + mode + "\r\n"
-                      "\r\n" + cipher + "\r\n";
-            }
+            benchPool.enqueue([&, i]() {
+                const std::string& sender = senders[static_cast<size_t>(i) % senders.size()];
+                const long long t0 = nowMs();
+                std::string subject = "[压测] 第 " + std::to_string(i + 1)
+                                    + "/" + std::to_string(kCount) + " 封";
+                std::string raw;
 
-            SmtpClient smtp(kMailServerIp, kSmtpPort);
-            const bool ok = smtp.sendRawMail(from, to, raw);
-            const long long el = nowMs() - t0;
-            if (ok) { ++smtpOk; totalLatencyMs += el; }
-            else {
-                ++smtpFail;
-                std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
-                          << smtp.getLastError() << std::endl;
-            }
-            if (i % 10 == 9) usleep(200 * 1000);
+                if (!isEnc) {
+                    raw = "From: " + sender + "\r\n"
+                          "To: " + to + "\r\n"
+                          "Subject: " + subject + "\r\n"
+                          + mimeHeaders + "\r\n" + payload;
+                } else {
+                    std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
+                    std::string cipher =
+                        keyReady ? MailCrypto::encryptPayload(inner, symKey, algo) : "";
+                    if (cipher.empty()) {
+                        ++smtpFail;
+                        std::lock_guard<std::mutex> lock(logMutex);
+                        std::cerr << "[HTTP] 第" << (i + 1) << "封加密失败("
+                                  << mode << ")" << std::endl;
+                        return;
+                    }
+                    raw = "From: " + sender + "\r\n"
+                          "To: " + to + "\r\n"
+                          "Subject: [加密邮件]\r\n"
+                          "X-MailForge-Crypto: " + mode + "\r\n"
+                          "\r\n" + cipher + "\r\n";
+                }
+
+                SmtpClient smtp(kMailServerIp, kSmtpPort);
+                const bool ok = smtp.sendRawMail(sender, to, raw);
+                const long long el = nowMs() - t0;
+                if (ok) {
+                    ++smtpOk;
+                    totalLatencyMs += el;
+                } else {
+                    ++smtpFail;
+                    std::lock_guard<std::mutex> lock(logMutex);
+                    std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
+                              << smtp.getLastError() << std::endl;
+                }
+            });
         }
+        benchPool.waitAll();
+        const long long sendMs = nowMs() - sendStart;
+        benchPool.stop();
+
+        const int smtpOkCount = smtpOk.load();
+        const int smtpFailCount = smtpFail.load();
+        const long long totalLatency = totalLatencyMs.load();
 
         // c) 收件端统计
         int afterCount = 0, received = 0;
@@ -1646,7 +1723,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             cnt.quit();
         }
 
-        // d) 加密轮：逐封 RETR 并解密，验证"密文可被正确还原"
+        // d) 加密轮逐封 RETR 并解密，验证密文可还原
         int decryptOk = 0;
         if (isEnc && received > 0) {
             Pop3Client ver(kMailServerIp, kPop3Port);
@@ -1686,31 +1763,38 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         const int lost = kCount - received;
         const double lossRate = (lost * 100.0) / kCount;
         const double avgLatencyMs =
-            smtpOk > 0 ? (double)totalLatencyMs / smtpOk : 0.0;
-        std::cout << "[HTTP] 压测轮 " << mode << " 结束：发送成功 " << smtpOk
-                  << "/" << kCount << "，实际收到 " << received
-                  << "，丢包率 " << lossRate << "%"
-                  << (isEnc ? "，解密还原 " + std::to_string(decryptOk) : "")
-                  << std::endl;
+            smtpOkCount > 0 ? (double)totalLatency / smtpOkCount : 0.0;
+        const double throughput =
+            sendMs > 0 ? (smtpOkCount * 1000.0 / (double)sendMs) : 0.0;
+
+        std::cout << "[HTTP] 压测轮 " << mode << " 结束：SMTP " << smtpOkCount
+                  << "/" << kCount << "，收到 " << received
+                  << "，发送耗时 " << sendMs << "ms，吞吐 "
+                  << throughput << " 封/s" << std::endl;
 
         return std::string("{")
             + "\"mode\":\"" + mode + "\""
             + ",\"encrypted\":" + (isEnc ? "true" : "false")
             + ",\"count\":" + std::to_string(kCount)
-            + ",\"smtpOk\":" + std::to_string(smtpOk)
-            + ",\"smtpFail\":" + std::to_string(smtpFail)
+            + ",\"threads\":" + std::to_string(concurrency)
+            + ",\"multi\":" + (senders.size() > 1 ? "true" : "false")
+            + ",\"senders\":" + sendersJson
+            + ",\"smtpOk\":" + std::to_string(smtpOkCount)
+            + ",\"smtpFail\":" + std::to_string(smtpFailCount)
             + ",\"received\":" + std::to_string(received)
             + ",\"decryptOk\":" + std::to_string(decryptOk)
             + ",\"lost\":" + std::to_string(lost)
             + ",\"lossRate\":" + std::to_string(lossRate)
             + ",\"avgLatencyMs\":" + std::to_string(avgLatencyMs)
-            + ",\"totalMs\":" + std::to_string(nowMs() - roundStart)
+            + ",\"sendMs\":" + std::to_string(sendMs)
+            + ",\"throughput\":" + std::to_string(throughput)
+            + ",\"totalMs\":" + std::to_string(nowMs() - sendStart)
             + "}";
     };
 
-    // 3) 依次跑完各模式
+    // 依次跑完各模式
     std::string resultsJson;
-    long long startMs = nowMs();
+    const long long startMs = nowMs();
     for (size_t m = 0; m < modes.size(); ++m) {
         const std::string rj = runRound(modes[m]);
         if (rj.empty()) {
@@ -1721,21 +1805,20 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         resultsJson += rj;
     }
 
-    // 汇总（用于 JSON 顶层与"全部模式"的概览）
     const std::string plainBody =
         std::string("{\"ok\":true")
         + ",\"modes\":[" + resultsJson + "]"
+        + ",\"threads\":" + std::to_string(concurrency)
+        + ",\"multi\":" + (senders.size() > 1 ? "true" : "false")
+        + ",\"senders\":" + sendersJson
         + ",\"sizeBytes\":" + std::to_string(mailBytes)
         + ",\"count\":\"" + modeParam + "\""
         + ",\"totalMs\":" + std::to_string(nowMs() - startMs)
         + ",\"msg\":\"压测完成，测试邮件已自动清理\"}";
     resp.contentType = "application/json; charset=utf-8";
-    // 压测与发信一致：请求带 web=1 且登记过浏览器公钥时，结果以 RSA 信封返回
     if (sealWebResponseIfNeeded(req, session, plainBody, resp)) return;
     resp.body = plainBody;
 }
-
-
 // ==================== 交互式协议终端（一问一答，保持连接） ====================
 namespace {
 // 一条正在进行的协议会话：fd 是连着 2525/1110 的 socket
