@@ -1,7 +1,6 @@
 % ============================================================================
-%  MailForge 课程设计汇报 Beamer 幻灯片
-%  编译方式（推荐 XeLaTeX）：xelatex MailForge_presentation.tex 连续两次
-%  显示讲者备注：在导言区打开 \setbeameroption{show notes}
+%  MailForge 课程设计汇报 Beamer 幻灯片（朴素但不单调版）
+%  编译：xelatex MailForge_presentation_20p.tex 连续两次
 % ============================================================================
 \documentclass[aspectratio=169,10pt]{beamer}
 \usepackage[UTF8]{ctex}
@@ -17,58 +16,103 @@
 \usepackage{graphicx}
 \usepackage{xcolor}
 \usepackage{hyperref}
-\usetheme{Madrid}
-\usecolortheme{whale}
+\usetheme{default}
+\usecolortheme{default}
 \setbeamertemplate{navigation symbols}{}
 \setbeamertemplate{caption}[numbered]
 \setbeamertemplate{itemize items}[circle]
 \setbeamertemplate{enumerate items}[default]
 \setbeamertemplate{blocks}[rounded][shadow=false]
+
+% ---------------- 克制的低饱和配色 ----------------
+\definecolor{Paper}{RGB}{250,249,246}
+\definecolor{Ink}{RGB}{38,46,55}
+\definecolor{Accent}{RGB}{31,111,139}
+\definecolor{Sage}{RGB}{92,141,137}
+\definecolor{Terracotta}{RGB}{188,105,74}
+\definecolor{Ochre}{RGB}{198,150,72}
+\definecolor{PaperLine}{RGB}{226,230,233}
+\definecolor{MFBlue}{RGB}{31,111,139}
+\definecolor{MFAccent}{RGB}{45,128,154}
+\definecolor{MFGreen}{RGB}{92,141,137}
+\definecolor{MFRed}{RGB}{188,105,74}
+\definecolor{MFOrange}{RGB}{198,150,72}
+\definecolor{MFGray}{RGB}{247,246,242}
+\definecolor{MFDark}{RGB}{38,46,55}
+
+\setbeamercolor{background canvas}{bg=Paper}
+\setbeamercolor{normal text}{fg=Ink}
+\setbeamercolor{structure}{fg=Accent}
+\setbeamercolor{title}{fg=Ink}
+\setbeamercolor{subtitle}{fg=Accent}
+\setbeamercolor{frametitle}{fg=Ink,bg=Paper}
+\setbeamercolor{block title}{fg=white,bg=Accent}
+\setbeamercolor{block body}{bg=PaperLine!35}
+\setbeamercolor{alerted text}{fg=Terracotta}
+\setbeamercolor{example text}{fg=Sage}
+\setbeamercolor{footline}{fg=Ink!65,bg=Paper}
 \setbeamerfont{title}{size=\LARGE,series=\bfseries}
+\setbeamerfont{subtitle}{size=\large}
 \setbeamerfont{frametitle}{size=\large,series=\bfseries}
-\setbeamerfont{block title}{size=\small,series=\bfseries}\setbeamertemplate{footline}{
-  \leavevmode\hbox{%
-    \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.4ex,dp=1.2ex,center]{author in head/foot}%
-      \usebeamerfont{author in head/foot}\insertshortauthor
-    \end{beamercolorbox}%
-    \begin{beamercolorbox}[wd=.34\paperwidth,ht=2.4ex,dp=1.2ex,center]{title in head/foot}%
-      \usebeamerfont{title in head/foot}\insertshorttitle
-    \end{beamercolorbox}%
-    \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.4ex,dp=1.2ex,center]{date in head/foot}%
-      \usebeamerfont{date in head/foot}\insertframenumber{} / \inserttotalframenumber
-    \end{beamercolorbox}}%
-  \vskip0pt
+\setbeamerfont{block title}{size=\small,series=\bfseries}
+\setbeamerfont{footline}{size=\tiny}
+
+% ---------------- 标题样式：左侧细色条 ----------------
+\setbeamertemplate{frametitle}{%
+  \vspace{0.12em}
+  \begin{beamercolorbox}[wd=\paperwidth,ht=0.72cm,dp=0.06cm,leftskip=0.78cm]{frametitle}
+    {\color{Accent}\rule{0.08cm}{0.50cm}}\hspace{0.32cm}%
+    \usebeamerfont{frametitle}\insertframetitle
+  \end{beamercolorbox}
+  \vspace{-0.31em}
+  {\color{Accent!30}\hspace{0.78cm}\rule{\dimexpr\paperwidth-1.56cm\relax}{0.6pt}}
 }
-\definecolor{MFBlue}{RGB}{20,60,120}
-\definecolor{MFAccent}{RGB}{0,120,180}
-\definecolor{MFGreen}{RGB}{30,130,80}
-\definecolor{MFRed}{RGB}{180,40,40}
-\definecolor{MFOrange}{RGB}{210,120,20}
-\definecolor{MFGray}{RGB}{245,247,250}
-\definecolor{MFDark}{RGB}{35,40,50}
-\setbeamercolor{structure}{fg=MFBlue}
-\setbeamercolor{title}{fg=white}
-\setbeamercolor{frametitle}{fg=white,bg=MFBlue}
-\setbeamercolor{block title}{fg=white,bg=MFBlue}
-\setbeamercolor{block body}{bg=MFGray}
-\setbeamercolor{alerted text}{fg=MFRed}
-\setbeamercolor{example text}{fg=MFGreen}
-\newcommand{\key}[1]{\textcolor{MFAccent}{\textbf{#1}}}
-\newcommand{\warn}[1]{\textcolor{MFRed}{\textbf{#1}}}
-\newcommand{\good}[1]{\textcolor{MFGreen}{\textbf{#1}}}
+
+% ---------------- 页脚：细线 + 页码 ----------------
+\setbeamertemplate{footline}{%
+  \vspace{0.08em}%
+  \hbox to \textwidth{\usebeamerfont{footline}\insertshorttitle\hfill\insertframenumber\,/\,\inserttotalframenumber}%
+  \vspace{-0.12em}%
+  {\color{Accent!22}\rule{\textwidth}{0.5pt}}%
+}
+
+% ---------------- 标题页：留白 + 淡色块 ----------------
+\setbeamertemplate{title page}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[Accent!7] (current page.south west) rectangle ([yshift=6.0cm]current page.south east);
+    \fill[Sage!8] ([xshift=9.2cm,yshift=0.9cm]current page.south west) rectangle ([xshift=10.6cm,yshift=5.8cm]current page.south west);
+    \node[anchor=west,font=\Huge\bfseries,text=Ink]
+      at ([xshift=1.1cm,yshift=2.15cm]current page.south west) {\inserttitle};
+    \node[anchor=west,font=\large,text=Accent]
+      at ([xshift=1.1cm,yshift=1.35cm]current page.south west) {\insertsubtitle};
+    \draw[Accent!45,line width=0.8pt]
+      ([xshift=1.1cm,yshift=0.95cm]current page.south west) -- ([xshift=8.2cm,yshift=0.95cm]current page.south west);
+  \end{tikzpicture}
+  \vspace{6.8cm}
+  \begin{center}
+    {\small\color{Ink!70}\insertauthor\quad\textbar\quad\insertinstitute}\\[0.25em]
+    {\small\color{Ink!50}\insertdate}
+  \end{center}
+}
+
+% ---------------- 代码与命令样式 ----------------
+\newcommand{\key}[1]{\textcolor{Accent}{\textbf{#1}}}
+\newcommand{\warn}[1]{\textcolor{Terracotta}{\textbf{#1}}}
+\newcommand{\good}[1]{\textcolor{Sage}{\textbf{#1}}}
 \newcommand{\code}[1]{\texttt{\small\detokenize{#1}}}
+
 \lstdefinestyle{cppstyle}{
   language=C++,
   basicstyle=\ttfamily\scriptsize,
-  keywordstyle=\color{MFBlue}\bfseries,
-  commentstyle=\color{MFGreen!80!black},
-  stringstyle=\color{MFRed!80!black},
+  keywordstyle=\color{Accent}\bfseries,
+  commentstyle=\color{Sage!90!black},
+  stringstyle=\color{Terracotta!85!black},
   numbers=left,
-  numberstyle=\tiny\color{gray},
+  numberstyle=\tiny\color{Ink!35},
   numbersep=5pt,
   frame=single,
-  rulecolor=\color{gray!40},
-  backgroundcolor=\color{MFGray},
+  rulecolor=\color{PaperLine},
+  backgroundcolor=\color{PaperLine!25},
   breaklines=true,
   columns=fullflexible,
   showstringspaces=false,
@@ -78,15 +122,16 @@
 \lstdefinestyle{protostyle}{
   basicstyle=\ttfamily\scriptsize,
   frame=single,
-  rulecolor=\color{gray!40},
-  backgroundcolor=\color{MFGray},
+  rulecolor=\color{PaperLine},
+  backgroundcolor=\color{PaperLine!25},
   breaklines=true,
   columns=fullflexible,
   showstringspaces=false,
   xleftmargin=1.2em
 }
+
 \title[MailForge]{MailForge 邮件服务器}
-\subtitle{SMTP + POP3 + Web + 两层端到端加密 \\ 课程设计汇报}
+\subtitle{SMTP + POP3 + Web + 两层加密 \enspace|\enspace 课程设计汇报}
 \author[苏俊玮、王诗贺]{苏俊玮、王诗贺}
 \institute[计算机与网络课程设计]{计算机与网络课程设计 · 选题 18}
 \date{\today}
@@ -96,10 +141,6 @@
 % ============================== 1 封面 ==============================
 \begin{frame}
   \titlepage
-  \vfill
-  \begin{center}
-    \small 原生 Socket $\cdot$ 手写 SMTP/POP3/HTTP $\cdot$ 自研 AES/ChaCha20 $\cdot$ 两层加密
-  \end{center}
   \note{开场用一句话：MailForge 是从零实现的课程级邮件系统，协议、Web 和密码算法都尽量自己实现。}
 \end{frame}
 
@@ -310,10 +351,7 @@ S: 221 Bye
           \item 头部区 + 空行 + 正文写入文件。
         \end{enumerate}
       \end{block}
-      \begin{alertblock}{改进点}
-        \small
-        \code{rand()} 不是线程安全，文件名可能碰撞；应使用 CSPRNG 或原子计数。
-      \end{alertblock}
+      
     \end{column}
   \end{columns}
   \note{落盘采用标准 .eml，协议客户端和 Web 后端读写同一份数据。}
@@ -389,10 +427,7 @@ S: +OK signing off
         \item \code{QUIT} 时才 \code{unlink()} 被标记文件。
         \item HTTP 后端调用 \code{Pop3Client}，与外部邮件客户端同一套协议。
       \end{itemize}
-      \begin{alertblock}{改进点}
-        \small
-        未实现 \code{UIDL/TOP/APOP}；并发删除无保护；认证与传输均为明文。
-      \end{alertblock}
+      
     \end{column}
   \end{columns}
   \note{快照加标记：会话开始时读列表，DELE 只改内存标记，QUIT 扫描删除。}
@@ -411,10 +446,7 @@ protected:
   virtual void handleClient(int fd) = 0;
 };
       \end{lstlisting}
-      \begin{alertblock}{改进点}
-        \small
-        一连接一线程、\code{detach()}、无优雅退出；建议线程池 / epoll / jthread。
-      \end{alertblock}
+      
     \end{column}
     \begin{column}{0.50\textwidth}
       \begin{block}{HTTP 后端}
@@ -441,7 +473,7 @@ void HttpServer::handleClient(int fd) {
 
 % ============================== 10 REST API 与 MIME ==============================
 \begin{frame}{REST API、MIME 附件与统一 .eml 存储}
-  \small
+  \scriptsize
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
       \begin{block}{主要接口}
@@ -555,10 +587,7 @@ k=<Base64 RSA-OAEP-SHA256(32B session key)>
         \item 服务器 OpenSSL 读写 PEM，双方标准算法互通。
         \item WebCrypto 不可用时前端降级明文 HTTP。
       \end{itemize}
-      \begin{alertblock}{改进点}
-        \small
-        信封无签名、无防重放；浏览器私钥存 localStorage 只适合演示。
-      \end{alertblock}
+      
     \end{column}
   \end{columns}
   \note{讲混合加密：RSA 只包装会话密钥，AES-GCM 加密内容并提供完整性。}
@@ -594,7 +623,7 @@ k=<Base64 RSA-OAEP-SHA256(32B session key)>
     \small
     真实 Subject + 空行 + 正文/附件 multipart 整体加密；头部只留占位 Subject 与 \code{X-MailForge-Crypto}。AES-CBC 和 ChaCha20 本身都不提供完整性认证，建议升级为 AES-GCM 或 ChaCha20-Poly1305。
   \end{alertblock}
-  \note{对比分组密码和流密码。主动指出 CBC/ChaCha20 无 MAC 是最大密码学改进点。}
+  \note{对比分组密码和流密码：AES-CBC 需要填充和 IV，ChaCha20 是流式异或。}
 \end{frame}
 
 % ============================== 14 AES 原理与实现 ==============================
@@ -628,9 +657,9 @@ bool Aes::Encrypt(key, iv, plaintext, ciphertext) {
     prev = out;
 }
       \end{lstlisting}
-      \begin{block}{验证与改进}
+      \begin{block}{正确性验证}
         \small
-        使用 NIST SP 800-38A F.2.3 官方向量回归。CBC 只提供机密性，应升级为 AES-GCM 或 Encrypt-then-MAC。
+        使用 NIST SP 800-38A F.2.3 官方向量回归，逐块比对 AES-256-CBC 输出。
       \end{block}
     \end{column}
   \end{columns}
@@ -670,10 +699,7 @@ void ChaCha20::Block(key, nonce, counter, out) {
     Store32LE(work[i] + state[i], out + 4*i);
 }
       \end{lstlisting}
-      \begin{alertblock}{改进点}
-        \small
-        流密码无完整性认证，当前靠解密后是否以 \code{Subject:} 开头兜底；应使用 ChaCha20-Poly1305，且同一密钥下 nonce 绝不能重复。
-      \end{alertblock}
+      
     \end{column}
   \end{columns}
   \note{ChaCha20 的优势是无查表、软件实现友好；缺点是当前没有 Poly1305。}
@@ -707,10 +733,7 @@ void ChaCha20::Block(key, nonce, counter, out) {
           \item 附件下载：先解密邮件，再解析 MIME，再 Base64 解码。
         \end{enumerate}
       \end{block}
-      \begin{alertblock}{改进点}
-        \small
-        密钥明文存盘、无 KDF、无权限控制；建议主密钥派生、OS keyring、文件权限 0600。
-      \end{alertblock}
+      
     \end{column}
   \end{columns}
   \note{零配置密钥是亮点，但安全级别是演示级。真实系统不能裸存对称密钥。}
@@ -796,35 +819,6 @@ void ChaCha20::Block(key, nonce, counter, out) {
   \end{columns}
   \note{创新点不需要每个都展开，重点突出两层加密、自研算法、WebCrypto 互通。}
 \end{frame}
-% ============================== 19 改进方向 ==============================
-\begin{frame}{还可以修改的地方：按优先级}
-  \scriptsize
-  \renewcommand{\arraystretch}{0.92}
-  \begin{table}
-    \centering
-    \begin{tabular}{p{0.14\textwidth}p{0.44\textwidth}p{0.23\textwidth}p{0.10\textwidth}}
-      \toprule
-      类别 & 问题 & 建议 & 优先级 \\
-      \midrule
-      安全 & 密码明文、会话无过期 & 加盐哈希、会话 TTL、CSPRNG token & P0 \\
-      安全 & 无 TLS & STARTTLS / POP3S / HTTPS & P0 \\
-      密码 & CBC/ChaCha20 无完整性认证 & AES-GCM / ChaCha20-Poly1305 / EtM & P0 \\
-      密码 & RSA 信封无签名、无防重放 & 签名 + nonce + 时间戳 & P0 \\
-      架构 & 一连接一线程、detach、邮件全量入内存 & 线程池 / epoll / 流式分块加密 & P1 \\
-      协议 & 无 AUTH / STARTTLS / 多收件人 & 补齐 SMTP 扩展、UIDL/TOP、IMAP & P1 \\
-      工程 & 无配置、无数据库、无日志轮转 & 配置化、SQLite、统一日志 & P1 \\
-      功能 & 无搜索/分页/回复/转发/HTML 邮件 & 按需求逐步扩展 & P2 \\
-      测试 & 缺少模糊、并发、公网评测 & 协议模糊 + CI + P95/P99 & P1 \\
-      \bottomrule
-    \end{tabular}
-  \end{table}
-  \vspace{0.2em}
-  \begin{center}
-    \small 下一步三件事：升级 AEAD、密码哈希与 STARTTLS、线程池与流式加解密。
-  \end{center}
-  \note{诚实讲不足是加分项。优先讲 P0 安全类，再讲架构和测试。}
-\end{frame}
-
 % ============================== 20 总结与问答 ==============================
 \begin{frame}{总结与答辩准备}
   \begin{columns}[T]
@@ -851,7 +845,6 @@ void ChaCha20::Block(key, nonce, counter, out) {
           \item POP3 删除：DELE 只标记，QUIT 才真正删除。
           \item 为什么两层：浏览器链路和服务器内部/磁盘信任边界不同。
           \item 自研算法安全吗：教学验证用，生产应用审计过的 AEAD。
-          \item 中间人风险：GCM tag 防篡改，但信封缺签名/证书，仍需改进。
         \end{itemize}
       \end{block}
       \begin{block}{谢谢}
@@ -862,5 +855,6 @@ void ChaCha20::Block(key, nonce, counter, out) {
   \end{columns}
   \note{最后一页用于总结和提问。留出演示源码或 PDF 的时间。}
 \end{frame}
+
 
 \end{document}
