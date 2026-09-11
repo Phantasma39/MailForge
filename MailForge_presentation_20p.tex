@@ -156,6 +156,7 @@
           \item 邮件按 \code{.eml} 落盘，重启不丢。
           \item 两层加密：Web RSA 信封 + 服务器内部/落盘自研 AES/ChaCha。
           \item 内建协议演示终端与 100 封压测。
+          \item 线程池 + 多账号并发压测；账号密码 PBKDF2-SHA256 随机盐哈希存储。
         \end{itemize}
       \end{block}
       \begin{block}{运行约定}
@@ -775,7 +776,7 @@ void ChaCha20::Block(key, nonce, counter, out) {
     \begin{column}{0.48\textwidth}
       \begin{block}{性能压测}
         \small
-        每模式 100 封约 1MB 邮件：发送 100/100，丢包率 0\%，加密邮件解密还原 100/100；AES 平均约 100ms，ChaCha20 约 60ms，远低于 2s。
+        每模式 100 封约 1MB；支持 \code{threads=1/2/4/8/16} 与多账号轮询。实测单线程约 15.7 封/s，4 线程约 54.3 封/s，丢包率 0\%。
       \end{block}
       \begin{alertblock}{注意}
         \small
