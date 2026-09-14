@@ -157,6 +157,7 @@
           \item 两层加密：Web RSA 信封 + 服务器内部/落盘自研 AES/ChaCha。
           \item 内建协议演示终端与 100 封压测。
           \item 线程池 + 多账号并发压测；账号密码 PBKDF2-SHA256 随机盐哈希存储。
+          \item 现代协议扩展：ESMTP AUTH PLAIN、POP3 CAPA/UIDL/TOP。
         \end{itemize}
       \end{block}
       \begin{block}{运行约定}
@@ -287,7 +288,7 @@ MailForge/
             \item \code{QUIT} 退出。
           \end{enumerate}
         \item 2xx 成功、3xx 中间态、4xx 暂时失败、5xx 永久失败。
-        \item 本项目实现核心命令，未实现 AUTH、STARTTLS、多收件人队列。
+        \item 本项目实现核心命令，并支持 ESMTP AUTH PLAIN；POP3 侧支持 CAPA、UIDL、TOP。STARTTLS/公网投递受环境限制暂未启用。
       \end{itemize}
     \end{column}
     \begin{column}{0.46\textwidth}

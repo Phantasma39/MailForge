@@ -14,7 +14,7 @@ MailForge 是一个从零实现的课程级邮件系统：
 
 | 能力 | 说明 |
 |---|---|
-| SMTP 发信 / POP3 收信 | 完整协议状态机，服务端口 2525 / 1110 |
+| SMTP 发信 / POP3 收信 | 完整协议状态机，服务端口 2525 / 1110；支持 ESMTP EHLO 扩展、AUTH PLAIN、POP3 CAPA/UIDL/TOP |
 | 多用户邮箱 | 每个账号独立收件目录 `./mailbox/<用户名>/`，账号表 `users.txt` |
 | Web 界面 | 注册 / 登录 / 写邮件 / 收件箱 / 阅读 / 删除 / 附件上传下载，端口 8080 |
 | 邮件附件 | MIME multipart，可与加密叠加（附件随正文一起封进信封） |
@@ -154,3 +154,16 @@ make clean         # 清理全部产物
 用 `http://<本机IP>:8080` 访问。
 
 课程需求细节与逐项对照见 `requirements.md`；加密子系统学习材料见 `crypto/docs/crypto_study_guide.md`。
+
+
+## 协议扩展说明
+
+为了更接近现代邮件服务器，项目在核心 SMTP/POP3 协议之上增加了以下扩展：
+
+- SMTP ESMTP：EHLO 多行能力声明，支持 SIZE、8BITMIME、AUTH PLAIN。
+- SMTP AUTH PLAIN：客户端可用一条 `AUTH PLAIN <Base64>` 完成账号认证，账号密码复用 `users.txt` 中的 PBKDF2 哈希。
+- POP3 CAPA：声明服务端支持的扩展能力。
+- POP3 UIDL：为每封邮件返回唯一标识，便于客户端去重。
+- POP3 TOP：只取邮件头和正文前 N 行，适合快速预览。
+
+说明：STARTTLS/STLS 需要证书与更完整的 TLS 连接抽象；公网投递还受 25 端口、公网 IP、DNS MX、SPF/DKIM/DMARC 等条件限制，本项目以本地/内网演示为主。

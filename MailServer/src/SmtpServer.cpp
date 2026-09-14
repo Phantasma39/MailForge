@@ -11,7 +11,9 @@
 #include <ctime>
 #include <chrono>
 #include <atomic>
-#include <sys/socket.h> 
+#include <sys/socket.h>
+#include "common/base64.hpp"
+#include "common/password.hpp" 
 
 namespace {
 // 线程池并发写邮件时，用原子序号保证文件名唯一（rand() 不是线程安全的）。
@@ -24,6 +26,44 @@ SmtpServer::SmtpServer(int port):Server(port){      //初始化SmptServer类，�
 
 
 //用于保证send全部发完，处理中断问题
+bool SmtpServer::authenticate(const std::string& userRaw,
+                              const std::string& pass) {
+    // 规范化用户名：取 @ 前部分并转小写，与 POP3/Web 登录保持一致。
+    std::string user = userRaw;
+    size_t at = user.find('@');
+    if (at != std::string::npos) user = user.substr(0, at);
+    while (!user.empty() && (user.front() == ' ' || user.front() == '\t')) user.erase(0, 1);
+    while (!user.empty() && (user.back() == ' ' || user.back() == '\t')) user.pop_back();
+    for (auto& c : user) c = (char)tolower((unsigned char)c);
+    if (user.empty()) return false;
+
+    // 优先读 users.txt；支持 PBKDF2 哈希和旧版明文。
+    std::ifstream in("./users.txt");
+    if (in.is_open()) {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            size_t b = line.find_first_not_of(" \t");
+            if (b == std::string::npos) continue;
+            size_t e = line.find_last_not_of(" \t");
+            std::string t = line.substr(b, e - b + 1);
+            if (t.empty() || t[0] == '#') continue;
+            size_t colon = t.find(':');
+            if (colon == std::string::npos) continue;
+            std::string name = t.substr(0, colon);
+            std::string stored = t.substr(colon + 1);
+            std::string norm = name;
+            size_t a = norm.find('@');
+            if (a != std::string::npos) norm = norm.substr(0, a);
+            for (auto& c : norm) c = (char)tolower((unsigned char)c);
+            if (norm == user) return mail::VerifyPassword(pass, stored);
+        }
+    }
+
+    // 没有任何 users.txt 时，保留内置演示账号，便于首次运行。
+    if ((user == "bob" || user == "alice") && pass == "123456") return true;
+    return false;
+}
 bool SmtpServer::sendAll(int fd, const char* data, size_t len) {
     size_t total_sent = 0;  // 已经发出去多少个字节
     
@@ -56,7 +96,7 @@ void SmtpServer::sendResponse(int fd, const std::string&response){
 }
 
 //按照SMTP协议处理命令
-bool SmtpServer::processCommand(int fd,const std::string& line,SmtpMail& mail,bool& dataMode){
+bool SmtpServer::processCommand(int fd,const std::string& line,SmtpMail& mail,bool& dataMode,bool& authed){
 
     if(dataMode){
         if(line =="."){     //smtp协议，在DATA模式下，如果出现一个"."，表示结束
@@ -106,10 +146,56 @@ bool SmtpServer::processCommand(int fd,const std::string& line,SmtpMail& mail,bo
         if(args.empty())    domain= "unknown" ;
         else domain = args;
     
-        sendResponse(fd,"250 Hello "+domain+",nice to meet you");
+        // ESMTP 能力声明：多行 250 响应让外部客户端知道服务端支持哪些扩展。
+        sendResponse(fd, "250-MailForge ESMTP ready");
+        sendResponse(fd, "250-SIZE 2100000");
+        sendResponse(fd, "250-AUTH PLAIN");
+        sendResponse(fd, "250-8BITMIME");
+        sendResponse(fd, "250 OK");
         return true;
     }
 
+    // ESMTP AUTH PLAIN：客户端一条命令携带 Base64("\0user\0pass")
+    if (cmd == "AUTH") {
+        if (authed) {
+            sendResponse(fd, "503 Already authenticated");
+            return true;
+        }
+        std::string mech = args;
+        std::string data;
+        size_t sp = args.find(' ');
+        if (sp != std::string::npos) {
+            mech = args.substr(0, sp);
+            data = args.substr(sp + 1);
+        }
+        for (auto& c : mech) c = (char)toupper((unsigned char)c);
+        if (mech != "PLAIN") {
+            sendResponse(fd, "504 Unsupported authentication mechanism");
+            return true;
+        }
+        if (data.empty()) {
+            // 为兼容只发 AUTH PLAIN 的客户端，提示它使用初始响应。
+            sendResponse(fd, "334 ");
+            return true;
+        }
+        std::string raw = mail::Base64DecodeToString(data);
+        size_t p1 = raw.find('\0');
+        size_t p2 = (p1 == std::string::npos) ? std::string::npos
+                                              : raw.find('\0', p1 + 1);
+        if (p1 == std::string::npos || p2 == std::string::npos) {
+            sendResponse(fd, "535 Invalid credentials format");
+            return true;
+        }
+        std::string authUser = raw.substr(p1 + 1, p2 - p1 - 1);
+        std::string authPass = raw.substr(p2 + 1);
+        if (authenticate(authUser, authPass)) {
+            authed = true;
+            sendResponse(fd, "235 Authentication successful");
+        } else {
+            sendResponse(fd, "535 Authentication failed");
+        }
+        return true;
+    }
     //MAIL FROM:<a@example.com>标准情况
     //MAIL命令，后面跟FROM:<a@example.com>
     if(cmd == "MAIL"){
@@ -267,6 +353,7 @@ void SmtpServer::handleClient(int client_fd) {
 
     SmtpMail mail;          // 本会话要拼装的邮件（初始为空，跨命令共享）
     bool dataMode = false;  // 初始不处于 DATA 模式
+    bool authed = false;    // ESMTP AUTH 是否已通过
 
     // 行缓冲：TCP 是流式协议，一次 recv 可能包含多条命令
     // （例如 "EHLO x\r\nMAIL FROM:<a@b>\r\n"），也可能一条命令被拆成多次 recv。
@@ -301,7 +388,7 @@ void SmtpServer::handleClient(int client_fd) {
 
             // 处理命令
             // processCommand 返回 false 表示会话结束（QUIT）
-            bool cont = processCommand(client_fd, line, mail, dataMode);
+            bool cont = processCommand(client_fd, line, mail, dataMode, authed);
             if (!cont) {
                 return;             // 结束本会话，由线程池任务统一 close
             }

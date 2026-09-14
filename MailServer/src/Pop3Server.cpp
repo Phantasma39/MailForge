@@ -339,6 +339,33 @@ void Pop3Server::sendMailContent(int fd, const std::string& path) {
     sendResponse(fd, ".");        // 多行内容的结束标记
 }
 
+void Pop3Server::sendMailTop(int fd, const std::string& path, int maxLines) {
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    if (!in.is_open()) {
+        sendResponse(fd, "-ERR cannot open message file");
+        return;
+    }
+
+    bool inBody = false;
+    int bodyLines = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (!inBody) {
+            if (!line.empty() && line[0] == '.') line = "." + line;
+            sendResponse(fd, line);
+            if (line.empty()) inBody = true;
+            continue;
+        }
+
+        if (bodyLines >= maxLines) break;
+        if (!line.empty() && line[0] == '.') line = "." + line;
+        sendResponse(fd, line);
+        ++bodyLines;
+    }
+    sendResponse(fd, ".");
+}
 // ==================== 核心：按 POP3 协议处理命令（状态机） ====================
 
 bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) {
@@ -375,6 +402,16 @@ bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) 
         return false;   // 返回 false → handleClient 关闭连接，结束会话
     }
 
+    // RFC 2449 CAPA：声明服务端支持的扩展能力。
+    if (cmd == "CAPA") {
+        sendResponse(fd, "+OK Capability list follows");
+        sendResponse(fd, "USER");
+        sendResponse(fd, "UIDL");
+        sendResponse(fd, "TOP");
+        sendResponse(fd, "RESP-CODES");
+        sendResponse(fd, ".");
+        return true;
+    }
     // ============ AUTHORIZATION 阶段（还没登录，只能 USER / PASS） ============
     if (!st.authed) {
         if (cmd == "USER") {
@@ -485,6 +522,47 @@ bool Pop3Server::processCommand(int fd, const std::string& line, Pop3State& st) 
         return true;
     }
 
+    // UIDL：返回每封邮件的唯一标识，便于客户端避免重复下载。
+    if (cmd == "UIDL") {
+        auto uidOf = [](const Pop3Mail& m) {
+            size_t slash = m.path.find_last_of("/\\");
+            return (slash == std::string::npos) ? m.path : m.path.substr(slash + 1);
+        };
+        if (args.empty()) {
+            sendResponse(fd, "+OK unique-id listing follows");
+            for (size_t i = 0; i < st.mails.size(); ++i) {
+                if (!st.mails[i].deleted) {
+                    sendResponse(fd, std::to_string(i + 1) + " " + uidOf(st.mails[i]));
+                }
+            }
+            sendResponse(fd, ".");
+        } else {
+            int num = parseMsgNum(args);
+            if (isValidMsg(num, st)) {
+                sendResponse(fd, "+OK " + std::to_string(num) + " " + uidOf(st.mails[num - 1]));
+            } else {
+                sendResponse(fd, "-ERR no such message");
+            }
+        }
+        return true;
+    }
+
+    // TOP：只发送邮件头和正文前 N 行，用于快速预览。
+    if (cmd == "TOP") {
+        std::istringstream iss(args);
+        int num = 0, lines = 0;
+        if (!(iss >> num >> lines) || num <= 0 || lines < 0) {
+            sendResponse(fd, "-ERR syntax: TOP msg lines");
+            return true;
+        }
+        if (!isValidMsg(num, st)) {
+            sendResponse(fd, "-ERR no such message");
+            return true;
+        }
+        sendResponse(fd, "+OK top of message follows");
+        sendMailTop(fd, st.mails[num - 1].path, lines);
+        return true;
+    }
     // RETR：下载某封邮件的完整内容（多行响应，用点填充规则发送）
     if (cmd == "RETR") {
         int num = parseMsgNum(args);

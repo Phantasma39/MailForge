@@ -2,6 +2,7 @@
 // 思路和服务端 SmtpServer.cpp 对称，可以对照着看
 
 #include "SmtpClient.h"
+#include "common/base64.hpp"
 #include <cstring>
 #include <cerrno>
 #include <unistd.h>
@@ -145,6 +146,11 @@ void SmtpClient::close() {
     }
 }
 
+void SmtpClient::setAuth(const std::string& user, const std::string& pass) {
+    useAuth_ = true;
+    authUser_ = user;
+    authPass_ = pass;
+}
 // ==================== 核心：发一封邮件 ====================
 
 // sendMail = 先拼好"带头部"的完整邮件原文，再走一次标准 SMTP 会话
@@ -179,6 +185,13 @@ bool SmtpClient::sendRawMail(const std::string& from,
     if (!sendLine("EHLO MailForgeClient")) { close(); return false; }
     if (!waitReply(250)) { close(); return false; }
 
+    // 2.5 可选 SMTP AUTH PLAIN
+    if (useAuth_) {
+        std::string raw = std::string(1, '\0') + authUser_ + std::string(1, '\0') + authPass_;
+        std::string b64 = mail::Base64Encode(raw);
+        if (!sendLine("AUTH PLAIN " + b64)) { close(); return false; }
+        if (!waitReply(235)) { close(); return false; }
+    }
     // 3. MAIL FROM 声明发件人
     if (!sendLine("MAIL FROM:<" + from + ">")) { close(); return false; }
     if (!waitReply(250)) { close(); return false; }

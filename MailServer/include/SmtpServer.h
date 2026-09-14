@@ -50,7 +50,7 @@ private:
 
     bool sendAll(int fd, const char* data, size_t len);
 
-    bool processCommand(int fd, const std::string& line, SmtpMail& mail, bool& dataMode);
+    bool processCommand(int fd, const std::string& line, SmtpMail& mail, bool& dataMode, bool& authed);
 
     // 发送响应行（给 response 补上 \r\n 后通过 socket 发出去）
     // SMTP 协议规定所有响应行必须以 \r\n 结尾，封装一层避免重复写
@@ -65,6 +65,9 @@ private:
     // 在头部原文中查找某个头字段（如 "From"、"Subject"）的值
     // 字段名大小写不敏感（RFC 5322：字段名不区分大小写），找不到返回空串
     std::string getHeaderValue(const std::string& headers, const std::string& name);
+
+    // ESMTP AUTH PLAIN / LOGIN 使用的账号密码校验。
+    bool authenticate(const std::string& user, const std::string& pass);
 
     // 保存邮件到文件（存储路径可配置，这里写死为 ./mailbox/）
     // 文件名用"时间戳_随机数.eml"，避免多线程并发时文件名冲突

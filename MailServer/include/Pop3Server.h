@@ -117,6 +117,9 @@ private:
     // RETR 时把邮件文件按 POP3 的"点填充"规则发出去：
     // 内容里以 "." 开头的行要写成 ".."，最后再发单独一行的 "." 表示正文结束
     void sendMailContent(int fd, const std::string& path);
+
+    // TOP 命令：只发送邮件头和正文前 maxLines 行，用于快速预览。
+    void sendMailTop(int fd, const std::string& path, int maxLines);
 };
 
 #endif // POP3_SERVER_H

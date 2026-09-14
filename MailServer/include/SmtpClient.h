@@ -67,6 +67,9 @@ public:
                      const std::string& to,
                      const std::string& rawMail);
 
+    // 可选：启用 SMTP AUTH PLAIN（连外部邮件服务器时需要）。
+    void setAuth(const std::string& user, const std::string& pass);
+
     // 主动关闭连接（析构函数也会自动调用，一般不用手动调）
     void close();
 
@@ -78,6 +81,9 @@ private:
     std::string server_;     // 服务器地址，如 127.0.0.1
     int port_;               // 服务器端口，如 2525
     std::string lastError_;  // 最近一次错误的描述
+    bool useAuth_ = false;      // 是否启用 SMTP AUTH
+    std::string authUser_;      // AUTH 用户名
+    std::string authPass_;      // AUTH 密码/授权码
 
     // 建立 TCP 连接（并设置 5 秒收发超时，防止一直卡死）
     bool connectServer();
