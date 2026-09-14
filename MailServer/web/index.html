@@ -157,14 +157,14 @@
     </div>
 
     <div id="paneLogin">
-      <div class="field"><label>用户名</label><input id="inUser" placeholder="如 bob"></div>
-      <div class="field"><label>密码</label><input id="inPass" type="password" placeholder="如 123456" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <div class="field"><label>用户名</label><input id="inUser"></div>
+      <div class="field"><label>密码</label><input id="inPass" type="password" onkeydown="if(event.key==='Enter')doLogin()"></div>
       <button class="btn primary" style="width:100%;justify-content:center" onclick="doLogin()">登 录</button>
       <div class="msg" id="loginMsg"></div>
     </div>
 
     <div id="paneReg" style="display:none">
-      <div class="field"><label>用户名（字母数字）</label><input id="regUser" placeholder="如 carol"></div>
+      <div class="field"><label>用户名（字母数字）</label><input id="regUser"></div>
       <div class="field"><label>密码（至少 4 位）</label><input id="regPass" type="password"></div>
       <div class="field"><label>确认密码</label><input id="regPass2" type="password" onkeydown="if(event.key==='Enter')doRegister()"></div>
       <button class="btn primary" style="width:100%;justify-content:center" onclick="doRegister()">注册并自动登录</button>
@@ -177,13 +177,13 @@
 
     <aside class="side">
       <div class="side-inner">
-        <button class="nav-btn on" data-sec="send"  onclick="goto('send')">✉ 写邮件</button>
-        <button class="nav-btn" data-sec="inbox" onclick="goto('inbox')">📥 收件箱<span id="inboxCount"></span></button>
-        <button class="nav-btn" data-sec="sent"  onclick="goto('sent')">📤 已发送<span id="sentCount"></span></button>
-        <button class="nav-btn" data-sec="bench" onclick="goto('bench')">⚡ 性能压测</button>
+        <button class="nav-btn on" data-sec="send"  onclick="goto('send')">写邮件</button>
+        <button class="nav-btn" data-sec="inbox" onclick="goto('inbox')">收件箱<span id="inboxCount"></span></button>
+        <button class="nav-btn" data-sec="sent"  onclick="goto('sent')">已发送<span id="sentCount"></span></button>
+        <button class="nav-btn" data-sec="bench" onclick="goto('bench')">性能压测</button>
         <div class="side-hr"></div>
-        <a class="nav-btn" href="/demo_smtp.html" style="display:block">🧪 SMTP 协议演示</a>
-        <a class="nav-btn" href="/demo_pop3.html" style="display:block">🧪 POP3 协议演示</a>
+        <a class="nav-btn" href="/demo_smtp.html" style="display:block"> SMTP 协议演示</a>
+        <a class="nav-btn" href="/demo_pop3.html" style="display:block"> POP3 协议演示</a>
         <div class="side-note">邮件加密：AES-256-CBC / ChaCha20<br>传输与落盘均为密文</div>
       </div>
     </aside>
@@ -192,7 +192,7 @@
       <!-- 写邮件 -->
       <section class="view on card" id="sec-send">
         <div class="rowbar"><h3>写邮件</h3></div>
-        <div class="field"><label>收件人</label><input id="inTo" placeholder="如 bob@example.com"></div>
+        <div class="field"><label>收件人</label><input id="inTo"></div>
         <div class="field"><label>主题</label><input id="inSubject"></div>
         <div class="field">
           <label>正文</label>
@@ -200,7 +200,7 @@
         </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="inWebRsa" checked style="width:auto;margin:0">
-          <label style="margin:0">层1：Web↔服务器 RSA 信封（AES-256-GCM + RSA-2048 · WebCrypto↔OpenSSL）</label>
+          <label style="margin:0">层1：Web 与服务器之间的 RSA 信封（AES-256-GCM + RSA-2048，WebCrypto 与 OpenSSL）</label>
         </div>
         <div class="field">
           <label>层2：发送时加密（服务器端口间 AES/ChaCha，传输与落盘前加密）</label>
@@ -226,7 +226,7 @@
         <div id="inboxListPane">
           <div class="rowbar">
             <h3>收件箱</h3>
-            <button class="btn sm" onclick="loadInbox()">↻ 刷新</button>
+            <button class="btn sm" onclick="loadInbox()">刷新</button>
           </div>
           <div class="mail-list" id="mailRows"></div>
           <div class="msg" id="inboxMsg"></div>
@@ -234,7 +234,7 @@
 
         <div id="readPane" style="display:none">
           <div class="rowbar">
-            <button class="btn sm" onclick="backToList()">← 返回列表</button>
+            <button class="btn sm" onclick="backToList()"> 返回列表</button>
             <button class="btn sm danger" id="btnDelete" onclick="doDelete()">删除这封</button>
           </div>
           <div class="mail-view-head">
@@ -258,7 +258,7 @@
         <div id="sentListPane">
           <div class="rowbar">
             <h3>已发送</h3>
-            <button class="btn sm" onclick="loadSent()">↻ 刷新</button>
+            <button class="btn sm" onclick="loadSent()">刷新</button>
           </div>
           <div class="mail-list" id="sentRows"></div>
           <div class="msg" id="sentMsg"></div>
@@ -266,7 +266,7 @@
 
         <div id="sentReadPane" style="display:none">
           <div class="rowbar">
-            <button class="btn sm" onclick="backToSentList()">← 返回列表</button>
+            <button class="btn sm" onclick="backToSentList()"> 返回列表</button>
             <button class="btn sm danger" onclick="deleteSent()">删除这封</button>
           </div>
           <div class="mail-view-head">
@@ -313,7 +313,7 @@
         </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
-          <label style="margin:0">层1：压测请求/结果走 Web↔服务器 RSA 信封（与发信一致，可关）</label>
+          <label style="margin:0">层1：压测请求/结果走 Web 与服务器之间的 RSA 信封（与发信一致，可关）</label>
         </div>
         <p class="muted" style="margin:0 0 12px">加密模式会逐封 RETR 验证“密文可被正确解密还原”。每模式约 30~90 秒，三种全跑约 2~4 分钟，期间请勿关闭页面。</p>
         <button class="btn primary" id="btnBench" onclick="runBench()">开始压测</button>
@@ -387,7 +387,7 @@ async function doLogin(){
   TOKEN = j.token; CURRENT_USER = user;
   localStorage.setItem("mf_token", TOKEN);
   localStorage.setItem("mf_user", CURRENT_USER);
-  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web↔服务器 RSA（后台）
+  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web 与服务器之间的 RSA（后台）
   setMsg("loginMsg", "登录成功", false);
   showLoginState();
 }
@@ -403,7 +403,7 @@ async function doRegister(){
   TOKEN = j.token; CURRENT_USER = u;
   localStorage.setItem("mf_token", TOKEN);
   localStorage.setItem("mf_user", CURRENT_USER);
-  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web↔服务器 RSA（后台）
+  WebRSA.reset(); WebRSA.ensureInit();   // 登录后初始化 Web 与服务器之间的 RSA（后台）
   setMsg("regMsg", "注册成功，已自动登录", false);
   showLoginState();
 }
@@ -456,7 +456,7 @@ async function doSend(){
   let j;
   if (useLayer1){
     // 层1：浏览器用"服务器公钥"把整个发送表单封成 RSA 信封（AES-GCM+RSA-OAEP），
-    //      服务器解包后继续走层2（AES/ChaCha 对称加密 → SMTP 端口间传输）。
+    //      服务器解包后继续走层2（AES/ChaCha 对称加密  SMTP 端口间传输）。
     const plain = new URLSearchParams({ to, subject, body, algo });
     if (algo !== "none") plain.set("encrypt", "1");
     if (ATT.filename && ATT.b64){ plain.set("filename", ATT.filename); plain.set("fileB64", ATT.b64); }
@@ -510,8 +510,8 @@ async function loadInbox(){
     let html = "";
     for (const m of j.mails){
       const tags =
-        (m.encrypted ? "<span class='pill enc'>🔒 加密</span> " : "") +
-        (m.attachment ? "<span class='pill att'>📎</span>" : "");
+        (m.encrypted ? "<span class='pill enc'>加密</span> " : "") +
+        (m.attachment ? "<span class='pill att'>附件</span>" : "");
       const from = (m.from || "").split("@")[0];
       html +=
         "<div class='mail-row' onclick='readMail(" + m.number + ")'>" +
@@ -606,7 +606,7 @@ async function readMail(n){
   const from = headField(head, "From");
   const to   = headField(head, "To");
 
-  $("readSubject").textContent = (j.encrypted ? "🔒 " : "") + subj;
+  $("readSubject").textContent = (j.encrypted ? "[加密] " : "") + subj;
   $("readFrom").textContent = "发件人: " + (from || "(未知)");
   $("readMeta").textContent = (to ? "收件人: " + to + "  ·  " : "")
                             + (j.encrypted ? "加密存储 · 已自动解密显示" : "");
@@ -620,11 +620,11 @@ async function readMail(n){
   const area = $("attArea");
   if (j.attachments && j.attachments.length){
     area.style.display = "";
-    let h = "📎 附件：";
+    let h = "附件：";
     for (const a of j.attachments){
       const fn = (a.filename || "file").replace(/['"]/g, "");
       h += "<button class='btn sm' style='margin:0 4px 4px 0' onclick='downloadAttachment(" +
-           CURRENT_N + "," + a.i + ",\"" + fn + "\")'>⬇ " + esc(a.filename) + "</button>";
+           CURRENT_N + "," + a.i + ",\"" + fn + "\")'>下载 " + esc(a.filename) + "</button>";
     }
     area.innerHTML = h;
   } else {
@@ -691,8 +691,8 @@ async function loadSent(){
     let html = "";
     for (const m of j.mails){
       const tags =
-        (m.encrypted ? "<span class='pill enc'>🔒 加密</span> " : "") +
-        (m.attachment ? "<span class='pill att'>📎</span>" : "");
+        (m.encrypted ? "<span class='pill enc'>加密</span> " : "") +
+        (m.attachment ? "<span class='pill att'>附件</span>" : "");
       html +=
         "<div class='mail-row' onclick='readSent(" + m.number + ")'>" +
           "<div style='min-width:56px'>" + tags + "</div>" +
@@ -724,7 +724,7 @@ async function readSent(n){
                (j.encrypted ? "(加密邮件，主题不可见)" : "(无主题)");
   const to = headField(head, "To") || j.to || "";
 
-  $("sentSubject").textContent = (j.encrypted ? "🔒 " : "") + subj;
+  $("sentSubject").textContent = (j.encrypted ? " " : "") + subj;
   $("sentTo").textContent = "收件人: " + (to || "(未知)");
   $("sentMeta").textContent = j.encrypted
     ? "已发送 · 加密存储（用发送者本人密钥保存，可自动解密查看）"
@@ -737,11 +737,11 @@ async function readSent(n){
   const area = $("sentAttArea");
   if (j.attachments && j.attachments.length){
     area.style.display = "";
-    let h = "📎 附件：";
+    let h = "附件：";
     for (const a of j.attachments){
       const fn = (a.filename || "file").replace(/['"]/g, "");
       h += "<button class='btn sm' style='margin:0 4px 4px 0' onclick='downloadSentAttachment(" +
-           CURRENT_SENT_N + "," + a.i + ",\"" + fn + "\")'>⬇ " + esc(a.filename) + "</button>";
+           CURRENT_SENT_N + "," + a.i + ",\"" + fn + "\")'>下载 " + esc(a.filename) + "</button>";
     }
     area.innerHTML = h;
   } else {
@@ -794,11 +794,11 @@ async function runBench(){
   const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
   btn.disabled = true;
   box.style.display = "none";
-  setMsg("benchMsg", "⏳ 压测进行中（" + (names[mode] || mode) +
+  setMsg("benchMsg", "压测进行中（" + (names[mode] || mode) +
          "，" + threads + " 线程，多账号=" + (multi === "1" ? "开" : "关") +
          "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
   try{
-    // 与发信一致：压测请求/结果可选走 Web↔服务器 RSA 信封（层1）
+    // 与发信一致：压测请求/结果可选走 Web 与服务器之间的 RSA 信封（层1）
     const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode)
                                  + "&threads=" + encodeURIComponent(threads)
                                  + "&multi=" + encodeURIComponent(multi),
@@ -812,7 +812,7 @@ async function runBench(){
     }
     setMsg("benchMsg", "", false);
     const mb = (j.sizeBytes / 1048576).toFixed(2);
-    const nameOf = { plain:"📄 明文", aes:"🔐 AES-256-CBC", chacha:"🔐 ChaCha20" };
+    const nameOf = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20" };
     let rows = "";
     for (const m of j.modes){
       const okStyle = m.lossRate > 0 ? "color:var(--err)" : "color:var(--ok)";
@@ -843,7 +843,7 @@ async function runBench(){
   }
 }
 
-/* ==================== 第一层：Web↔服务器 RSA 信封（浏览器 WebCrypto） ==================== */
+/* ==================== 第一层：Web 与服务器之间的 RSA 信封（浏览器 WebCrypto） ==================== */
 /* 与服务器 MailCrypto::webEnvelopeSeal/Open 互通：
    k=<Base64 RSA-OAEP-SHA256(随机 AES-256-GCM 会话密钥)>|iv=<Base64 IV(12B)>|ct=<Base64 GCM密文+tag>
    浏览器密钥对（RSA-OAEP-2048）以 JWK 存 localStorage，公钥上传 /api/webpub。 */
@@ -909,7 +909,7 @@ const WebRSA = {
     return this._init;
   },
   reset(){ this.enabled = false; this._init = null; },
-  async seal(plainText){            // 浏览器 → 服务器信封
+  async seal(plainText){            // 浏览器  服务器信封
     await this.ensureInit();
     if (!this.enabled) return "";
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -920,7 +920,7 @@ const WebRSA = {
     const wrapped = await crypto.subtle.encrypt({ name:"RSA-OAEP" }, this.serverPub, raw);
     return "k=" + this.b64e(wrapped) + "|iv=" + this.b64e(iv) + "|ct=" + this.b64e(ct);
   },
-  async unseal(packed){             // 服务器 → 浏览器信封
+  async unseal(packed){             // 服务器  浏览器信封
     const f = n => { const m = new RegExp("(?:^|\\|)" + n + "=([^|]*)").exec(packed);
                      return m ? m[1] : ""; };
     const wrapped = this.b64d(f("k")), iv = this.b64d(f("iv")), ct = this.b64d(f("ct"));
