@@ -107,6 +107,7 @@ private:
     void handleSentAttachment(const HttpRequest& req, HttpResponse& resp);  // GET  /api/sent/attachment
     void handleSentDelete(const HttpRequest& req, HttpResponse& resp);      // POST /api/sent/delete
     void handleBenchmark(const HttpRequest& req, HttpResponse& resp); // GET /api/benchmark（性能压测）
+    void handleCryptoBench(const HttpRequest& req, HttpResponse& resp); // GET /api/cryptobench（只测内部加解密）
     void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
     // Web↔服务器 RSA 密钥交换（第一层加密）
     void handleWebKey(const HttpRequest& req, HttpResponse& resp);   // GET  /api/webkey 下发服务器 RSA 公钥

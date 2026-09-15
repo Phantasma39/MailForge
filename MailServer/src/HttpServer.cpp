@@ -806,6 +806,8 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleMail(req, resp);
     } else if (req.method == "GET" && req.path == "/api/benchmark") {
         handleBenchmark(req, resp);
+    } else if (req.method == "GET" && req.path == "/api/cryptobench") {
+        handleCryptoBench(req, resp);
     } else if (req.method == "GET" && req.path == "/api/attachment") {
         handleAttachment(req, resp);
     } else if (req.method == "GET" && req.path == "/api/sent") {
@@ -1522,6 +1524,125 @@ void HttpServer::handleDelete(const HttpRequest& req, HttpResponse& resp) {
     resp.body = jsonResult(true, "已删除第 " + std::to_string(number) + " 封");
 }
 
+
+// ==================== GET /api/cryptobench ====================
+// 只测试服务器内部对称加解密（AES-256-CBC / ChaCha20），不走 RSA、SMTP、POP3、磁盘。
+void HttpServer::handleCryptoBench(const HttpRequest& req, HttpResponse& resp) {
+    Session session;
+    if (!loginAndGetSession(getParam(req, "token"), session)) {
+        resp.body = jsonResult(false, "token 无效或已过期，请先登录");
+        return;
+    }
+
+    std::string algoParam = getParam(req, "algo");
+    if (algoParam.empty()) algoParam = "aes";
+
+    std::vector<std::pair<std::string, MailCrypto::CryptoAlgo>> modes;
+    if (algoParam == "all") {
+        modes.push_back({"aes", MailCrypto::ALGO_AES_CBC});
+        modes.push_back({"chacha", MailCrypto::ALGO_CHACHA20});
+    } else if (algoParam == "aes") {
+        modes.push_back({"aes", MailCrypto::ALGO_AES_CBC});
+    } else if (algoParam == "chacha" || algoParam == "chacha20") {
+        modes.push_back({"chacha", MailCrypto::ALGO_CHACHA20});
+    } else {
+        resp.body = jsonResult(false, "algo 只能是 aes / chacha / all");
+        return;
+    }
+
+    int count = atoi(getParam(req, "count").c_str());
+    if (count <= 0) count = 100;
+    if (count > 1000) count = 1000;
+    int sizeKB = atoi(getParam(req, "sizeKB").c_str());
+    if (sizeKB <= 0) sizeKB = 1024;
+    if (sizeKB > 4096) sizeKB = 4096;
+    int threads = atoi(getParam(req, "threads").c_str());
+    if (threads <= 0) threads = 1;
+    if (threads > 16) threads = 16;
+
+    std::string key;
+    if (!MailCrypto::getUserKey(session.user, key)) {
+        resp.body = jsonResult(false, "无法读取用户对称密钥");
+        return;
+    }
+
+    const size_t payloadSize = static_cast<size_t>(sizeKB) * 1024;
+    std::string payload = "Subject: CryptoBench\r\n\r\n";
+    if (payload.size() < payloadSize) payload.append(payloadSize - payload.size(), 'A');
+
+    auto nowMs = []() -> long long {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    std::string resultsJson;
+    const long long totalStart = nowMs();
+    for (const auto& item : modes) {
+        const std::string mode = item.first;
+        const MailCrypto::CryptoAlgo algo = item.second;
+
+        std::atomic<int> ok{0};
+        std::atomic<int> fail{0};
+        std::atomic<long long> encMs{0};
+        std::atomic<long long> decMs{0};
+
+        const long long start = nowMs();
+        ThreadPool pool(static_cast<std::size_t>(threads));
+        for (int i = 0; i < count; ++i) {
+            pool.enqueue([&, algo]() {
+                const long long t0 = nowMs();
+                std::string cipher = MailCrypto::encryptPayload(payload, key, algo);
+                const long long t1 = nowMs();
+                if (cipher.empty()) {
+                    ++fail;
+                    return;
+                }
+                std::string plain;
+                const bool decOk = MailCrypto::decryptPayload(cipher, key, plain);
+                const long long t2 = nowMs();
+                encMs += (t1 - t0);
+                decMs += (t2 - t1);
+                if (decOk && plain == payload) ++ok;
+                else ++fail;
+            });
+        }
+        pool.waitAll();
+        pool.stop();
+
+        const long long wallMs = nowMs() - start;
+        const int okCount = ok.load();
+        const int failCount = fail.load();
+        const long long totalEnc = encMs.load();
+        const long long totalDec = decMs.load();
+        const double avgEnc = okCount > 0 ? (double)totalEnc / okCount : 0.0;
+        const double avgDec = okCount > 0 ? (double)totalDec / okCount : 0.0;
+        const double throughput = wallMs > 0 ? okCount * 1000.0 / (double)wallMs : 0.0;
+
+        if (!resultsJson.empty()) resultsJson += ",";
+        resultsJson += std::string("{")
+            + "\"mode\":\"" + mode + "\""
+            + ",\"count\":" + std::to_string(count)
+            + ",\"sizeBytes\":" + std::to_string(payloadSize)
+            + ",\"threads\":" + std::to_string(threads)
+            + ",\"ok\":" + std::to_string(okCount)
+            + ",\"fail\":" + std::to_string(failCount)
+            + ",\"encryptMs\":" + std::to_string(totalEnc)
+            + ",\"decryptMs\":" + std::to_string(totalDec)
+            + ",\"cryptoMs\":" + std::to_string(totalEnc + totalDec)
+            + ",\"avgEncryptMs\":" + std::to_string(avgEnc)
+            + ",\"avgDecryptMs\":" + std::to_string(avgDec)
+            + ",\"wallMs\":" + std::to_string(wallMs)
+            + ",\"throughput\":" + std::to_string(throughput)
+            + "}";
+    }
+
+    resp.contentType = "application/json; charset=utf-8";
+    resp.body = std::string("{\"ok\":true") +
+                ",\"modes\":[" + resultsJson + "]" +
+                ",\"sizeKB\":" + std::to_string(sizeKB) +
+                ",\"totalMs\":" + std::to_string(nowMs() - totalStart) +
+                ",\"msg\":\"内部加解密压测完成，未使用 RSA/SMTP/POP3/磁盘\"}";
+}
 
 // ==================== GET /api/benchmark ====================
 // 性能压测：连发 100 封带约 1MB 附件(multipart)的邮件，统计成功率/丢包率/时延，

@@ -167,3 +167,13 @@ make clean         # 清理全部产物
 - POP3 TOP：只取邮件头和正文前 N 行，适合快速预览。
 
 说明：STARTTLS/STLS 需要证书与更完整的 TLS 连接抽象；公网投递还受 25 端口、公网 IP、DNS MX、SPF/DKIM/DMARC 等条件限制，本项目以本地/内网演示为主。
+
+## 服务器内部加解密压测
+
+新增 GET /api/cryptobench，只测试服务器内部 AES-256-CBC / ChaCha20 加解密，不走 RSA、SMTP、POP3、磁盘：
+
+`ash
+python crypto_bench_client.py --host 140.143.233.15 --user alice --password 123456 --algo all --count 100 --size-kb 1024 --threads 4
+`
+
+参数：lgo=aes|chacha|all、count=100、sizeKB=1024、	hreads=1/2/4/8/16。
