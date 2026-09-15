@@ -834,6 +834,7 @@ async function runBench(){
             + "<td>" + (m.totalMs/1000).toFixed(1) + " s</td></tr>";
 
       timeRows += "<tr><td>" + (nameOf[m.mode] || m.mode) + "</td>"
+            + "<td>" + (m.sendMs || 0).toFixed(0) + " ms</td>"
             + "<td>" + (m.transferMs || 0).toFixed(0) + " ms</td>"
             + "<td>" + (m.encryptMs || 0).toFixed(0) + " ms</td>"
             + "<td>" + (m.decryptMs || 0).toFixed(0) + " ms</td>"
@@ -849,10 +850,10 @@ async function runBench(){
       "<th>模式</th><th>并发/账号</th><th>SMTP 成功</th><th>收到</th><th>解密还原</th>" +
       "<th>丢包率</th><th>总用时</th></tr>" +
       rows + "</table>" +
-      "<p class='muted' style='margin-top:14px'><b>时间分解</b>：传输时间只统计 SMTP 收发，加密/解密单独统计。</p>" +
+      "<p class='muted' style='margin-top:14px'><b>时间分解</b>：发送墙钟是实际发送阶段时间；传输时间(累加)是各邮件 SMTP 耗时之和，并发时会大于墙钟。</p>" +
       "<table class='res'><tr>" +
-      "<th>模式</th><th>传输时间</th><th>加密时间</th><th>解密时间</th><th>加密+解密</th>" +
-      "<th>传输速度</th><th>平均每封传输</th></tr>" +
+      "<th>模式</th><th>发送墙钟</th><th>传输时间(累加)</th><th>加密时间</th><th>解密时间</th><th>加密+解密</th>" +
+      "<th>传输速度</th><th>单封平均传输</th></tr>" +
       timeRows + "</table>" +
       "<p class='muted'>账号统计：" + (senderStatText || "—") + "</p>" +
       "<p class='muted'>总耗时 " + (j.totalMs/1000).toFixed(1) + " 秒</p>";
