@@ -167,14 +167,3 @@ make clean         # 清理全部产物
 - POP3 TOP：只取邮件头和正文前 N 行，适合快速预览。
 
 说明：STARTTLS/STLS 需要证书与更完整的 TLS 连接抽象；公网投递还受 25 端口、公网 IP、DNS MX、SPF/DKIM/DMARC 等条件限制，本项目以本地/内网演示为主。
-
-## 真实网络压测脚本
-
-项目根目录提供了 
-etwork_bench.py，从本机通过公网连接服务器的 SMTP 2525 和 POP3 1110 进行真实网络压测。
-
-`ash
-python network_bench.py --host 140.143.233.15 --count 100 --size-mb 1 --threads 4 --accounts 4 --verify 10
-`
-
-脚本会自动检测端口、注册临时测试账号、发送邮件、统计 POP3 收件数，并清理临时测试账号的测试邮件。
