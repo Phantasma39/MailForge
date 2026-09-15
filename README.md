@@ -185,3 +185,12 @@ python crypto_bench_client.py --host 140.143.233.15 --user alice --password 1234
 `ash
 python http_mail_bench.py --host 140.143.233.15 --count 100 --size-kb 1024 --threads 4 --accounts 4 --algo aes
 `
+
+## 管理员界面
+
+访问 http://服务器:8080/admin.html 可以动态调整 SMTP / POP3 / HTTP 三个服务器的线程池 worker 数量（1~32），修改后立即对新连接生效。
+
+- 默认管理员令牌：mailforge-admin。
+- 可在服务器启动时通过 MAILFORGE_ADMIN_TOKEN 环境变量修改。
+- 管理员令牌与普通用户 token 分离。
+- 压测脚本中的 --threads 控制客户端 HTTP 并发，不等于服务器线程池大小；服务器线程池请使用管理员界面调整。

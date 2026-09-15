@@ -110,6 +110,10 @@ private:
     void handleCryptoBench(const HttpRequest& req, HttpResponse& resp); // GET /api/cryptobench（只测内部加解密）
     void handleAttachment(const HttpRequest& req, HttpResponse& resp); // GET /api/attachment（下载附件）
     // Web↔服务器 RSA 密钥交换（第一层加密）
+    void handleAdminThreadsGet(const HttpRequest& req, HttpResponse& resp);  // GET  /api/admin/threads
+    void handleAdminThreadsSet(const HttpRequest& req, HttpResponse& resp);  // POST /api/admin/threads
+    bool checkAdminToken(const HttpRequest& req);
+
     void handleWebKey(const HttpRequest& req, HttpResponse& resp);   // GET  /api/webkey 下发服务器 RSA 公钥
     void handleWebPub(const HttpRequest& req, HttpResponse& resp);   // POST /api/webpub 接收浏览器 RSA 公钥
     // 若 session 登记了浏览器公钥且请求带 web=1：把明文响应封装成 RSA 信封写回，

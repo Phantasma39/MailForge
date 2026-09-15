@@ -820,6 +820,10 @@ void HttpServer::handleApi(const HttpRequest& req, HttpResponse& resp) {
         handleSentDelete(req, resp);                 // 已发送：删除
     } else if (req.method == "GET" && req.path == "/api/webkey") {
         handleWebKey(req, resp);                     // Web↔服务器 RSA：下发服务器公钥
+    } else if (req.method == "GET" && req.path == "/api/admin/threads") {
+        handleAdminThreadsGet(req, resp);            // 管理员：读取线程池线程数
+    } else if (req.method == "POST" && req.path == "/api/admin/threads") {
+        handleAdminThreadsSet(req, resp);            // 管理员：设置线程池线程数
     } else if (req.method == "POST" && req.path == "/api/webpub") {
         handleWebPub(req, resp);                     // Web↔服务器 RSA：登记浏览器公钥
     } else if (req.method == "POST" && req.path == "/api/raw/smtp/open") {
@@ -846,6 +850,40 @@ static std::string getParam(const HttpRequest& req, const std::string& key) {
     auto q = req.query.find(key);
     if (q != req.query.end()) return q->second;
     return "";
+}
+
+// ==================== 管理员：线程池线程数 ====================
+bool HttpServer::checkAdminToken(const HttpRequest& req) {
+    const char* env = std::getenv("MAILFORGE_ADMIN_TOKEN");
+    const std::string expected = env ? env : "mailforge-admin";
+    return getParam(req, "adminToken") == expected;
+}
+
+void HttpServer::handleAdminThreadsGet(const HttpRequest& req, HttpResponse& resp) {
+    if (!checkAdminToken(req)) {
+        resp.body = jsonResult(false, "管理员令牌错误");
+        return;
+    }
+    resp.body = std::string("{\"ok\":true,\"threads\":") +
+                std::to_string(Server::currentWorkerCount()) + "}";
+}
+
+void HttpServer::handleAdminThreadsSet(const HttpRequest& req, HttpResponse& resp) {
+    if (!checkAdminToken(req)) {
+        resp.body = jsonResult(false, "管理员令牌错误");
+        return;
+    }
+    int n = atoi(getParam(req, "threads").c_str());
+    if (n < 1 || n > 32) {
+        resp.body = jsonResult(false, "线程数必须在 1~32 之间");
+        return;
+    }
+    if (!Server::setAllWorkerCounts(n)) {
+        resp.body = jsonResult(false, "线程数设置失败");
+        return;
+    }
+    resp.body = std::string("{\"ok\":true,\"threads\":") +
+                std::to_string(Server::currentWorkerCount()) + "}";
 }
 
 // ==================== POST /api/register ====================

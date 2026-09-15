@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MailForge 管理员</title>
+<style>
+  :root{--bg:#f5f7fb;--card:#fff;--line:#dde3ec;--ink:#1f2937;--muted:#6b7280;--accent:#1f6f8b;--ok:#15803d;--err:#b91c1c}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+  .wrap{max-width:760px;margin:60px auto;padding:0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:24px 26px;box-shadow:0 6px 18px rgba(15,23,42,.05)}
+  h1{margin:0 0 6px;font-size:22px}
+  .muted{color:var(--muted);font-size:13px}
+  .field{margin:16px 0}
+  label{display:block;margin-bottom:6px;font-weight:600}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:6px;font-size:14px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  button{border:0;border-radius:6px;padding:10px 16px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
+  button.secondary{background:#e8eef4;color:var(--ink)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .msg{margin-top:12px;min-height:22px;font-size:13px}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  .threads{font-size:34px;font-weight:700;color:var(--accent);margin:8px 0}
+  a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>MailForge 管理员</h1>
+    <div class="muted">控制 SMTP / POP3 / HTTP 三个服务器的线程池 worker 数量。修改后立即对新连接生效。</div>
+
+    <div class="field">
+      <label>管理员令牌</label>
+      <input id="adminToken" type="password" value="mailforge-admin">
+      <div class="muted">可在服务器启动时通过环境变量 MAILFORGE_ADMIN_TOKEN 修改。</div>
+    </div>
+
+    <div class="field">
+      <label>当前线程池 worker 数</label>
+      <div class="threads" id="curThreads">--</div>
+    </div>
+
+    <div class="field">
+      <label>设置线程数（1~32）</label>
+      <input id="threadCount" type="number" min="1" max="32" value="2">
+    </div>
+
+    <div class="row">
+      <button id="btnGet">读取当前线程数</button>
+      <button id="btnSet">应用线程数</button>
+      <a class="secondary" href="/" style="padding:10px 16px;border-radius:6px;background:#e8eef4;color:#1f2937">返回邮箱</a>
+    </div>
+    <div class="msg" id="msg"></div>
+
+    <div class="muted" style="margin-top:18px">
+      线程数只影响服务器处理新连接的 worker 数量；压测脚本中的 --threads 控制客户端 HTTP 并发，两者不同。
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function setMsg(text, err){
+  const el = $("msg");
+  el.textContent = text || "";
+  el.className = "msg " + (err ? "err" : "ok");
+}
+async function getThreads(){
+  const token = $("adminToken").value;
+  try{
+    const r = await fetch("/api/admin/threads?adminToken=" + encodeURIComponent(token));
+    const j = await r.json();
+    if (!j.ok){ setMsg(j.msg || "读取失败", true); return; }
+    $("curThreads").textContent = j.threads;
+    $("threadCount").value = j.threads;
+    setMsg("读取成功", false);
+  }catch(e){
+    setMsg("请求失败: " + e, true);
+  }
+}
+async function setThreads(){
+  const token = $("adminToken").value;
+  const n = $("threadCount").value;
+  try{
+    const r = await fetch("/api/admin/threads", {
+      method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({adminToken: token, threads: n})
+    });
+    const j = await r.json();
+    if (!j.ok){ setMsg(j.msg || "设置失败", true); return; }
+    $("curThreads").textContent = j.threads;
+    setMsg("已设置为 " + j.threads + " 个 worker", false);
+  }catch(e){
+    setMsg("请求失败: " + e, true);
+  }
+}
+$("btnGet").onclick = getThreads;
+$("btnSet").onclick = setThreads;
+getThreads();
+</script>
+</body>
+</html>

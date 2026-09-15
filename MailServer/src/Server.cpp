@@ -1,121 +1,156 @@
-// Server.cpp用于实现服务器的基类
-//主要用于后续SMTP和POP3的复用
-//有好多新函数，好神奇
-
 #include "Server.h"
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
-
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-//构造函数
-Server::Server(int port)    //port:端口，可以随意编写
-    :server_fd(-1),port(port),is_running(false){}   //server_fd：监听套接字（socket 文件描述符）
+std::mutex Server::registryMutex_;
+std::vector<Server*> Server::instances_;
+std::atomic<int> Server::globalWorkerCount_{0};
 
-//析构函数
-Server::~Server()
-{
+Server::Server(int port)
+    : server_fd(-1), port(port), is_running(false), workerCount_(0) {
+    std::lock_guard<std::mutex> lock(registryMutex_);
+    instances_.push_back(this);
+}
+
+Server::~Server() {
     stop();
-}    
+    std::lock_guard<std::mutex> lock(registryMutex_);
+    for (auto it = instances_.begin(); it != instances_.end(); ++it) {
+        if (*it == this) {
+            instances_.erase(it);
+            break;
+        }
+    }
+}
 
-//服务器启动，返回一个是否启动的bool值
-bool Server::start(){
-    server_fd = socket(AF_INET,SOCK_STREAM,0);  //向操作系统申请一个网络设备,AF_INET表示ipv4形式
-                                                //SOCK_STREAM表示可靠传输流通道
-                                                //0表示自动配制协议，这里由于SOCK_STREAM，自动匹配TCP协议
-    if(server_fd<0){    //如果申请成功，server_fd是一个非负整数
+bool Server::start() {
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
         perror("socket创建失败");
         return false;
     }
-    // 注意：这里不能提前 return！下面的 setsockopt/bind/listen/accept 循环
-    // 都是服务器必须执行的步骤，如果在这里 return，服务器会"秒退"不监听端口
 
-    //设置端口复用，我有点不懂，但是大概就是如果不设置在失败后不能把端口立即服用
     int opt = 1;
-    if(setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt))){
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt 失败");
         close(server_fd);
         return false;
-    } 
+    }
 
-    //绑定地址和端口，就是吧端口所有的请求都放到server_fd里面管
-    struct sockaddr_in address; //一个IPv4的结构体，里面存了IP+端口
-    memset(&address,0,sizeof(address));     //清理数据
-    address.sin_family = AF_INET;   //存放ip地址
-    address.sin_addr.s_addr = INADDR_ANY;   //用于配制监听所有的网卡
-    address.sin_port = htons(port);     //端口转为网络字节序
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(port);
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {     //bind函数把我的ip地址以及端口与server_fd绑在一起
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         perror("bind 失败（端口被占用？）");
         close(server_fd);
         return false;
     }
 
-    //开始监听，最大等待队列5，操作系统内核把 server_fd 的内部状态标志位，从“主动连接”（默认）切换成了“被动监听”（TCP_LISTEN）
-    if(listen(server_fd,5)<0){
+    if (listen(server_fd, 64) < 0) {
         perror("listen 失败");
         close(server_fd);
         return false;
     }
 
-    is_running=true;
-    pool_ = std::make_unique<ThreadPool>(ThreadPool::DefaultThreads());
-    std::cout << "[服务器] 已启动，监听端口 " << port
-              << "，线程池 worker 数 " << pool_->workerCount() << std::endl;
+    is_running = true;
+    {
+        std::lock_guard<std::mutex> lock(poolMutex_);
+        if (workerCount_ <= 0) workerCount_ = static_cast<int>(ThreadPool::DefaultThreads());
+        pool_ = std::make_unique<ThreadPool>(static_cast<std::size_t>(workerCount_));
+        globalWorkerCount_.store(workerCount_);
+        std::cout << "[服务器] 已启动，监听端口 " << port
+                  << "，线程池 worker 数 " << pool_->workerCount() << std::endl;
+    }
 
-    //主循环启动
-
-    while(is_running){
-        struct sockaddr_in client_addr;     //创建一个结构体，用于存储客户端的地址
-        socklen_t client_len = sizeof(client_addr);     //client_in用于储存client——addr的大小，据说是为了不同平台移植
-
-        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);     //创建client_fd，把它和地址端口绑定在一起
-
+    while (is_running) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) {
-            if (!is_running) {
-                break;   // 正常退出循环
-            }
+            if (!is_running) break;
             perror("accept 失败");
-            continue;    // 非致命错误，继续等待下一个连接
+            continue;
         }
 
         char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);      //把二进制的IP地址转化成刻度的0.0.0.0类型的ip地址
-        
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
         std::cout << "[服务器] 新连接来自 " << client_ip << ":"
                   << ntohs(client_addr.sin_port) << std::endl;
-
-
-        // 交给线程池：worker 复用，避免每连接反复创建/销毁线程。
-        pool_->enqueue([this, client_fd]() {
-            this->handleClient(client_fd);
-            close(client_fd);
-        });
+        enqueueClient(client_fd);
     }
 
-    //关闭服务器：先停 accept，再等待线程池中已接收的连接处理完。
-    if (pool_) {
-        pool_->stop();
-        pool_.reset();
+    {
+        std::lock_guard<std::mutex> lock(poolMutex_);
+        if (pool_) {
+            pool_->stop();
+            pool_.reset();
+        }
     }
     close(server_fd);
     std::cout << "[服务器] 已停止" << std::endl;
     return true;
 }
 
+void Server::enqueueClient(int client_fd) {
+    std::lock_guard<std::mutex> lock(poolMutex_);
+    if (!pool_) {
+        close(client_fd);
+        return;
+    }
+    pool_->enqueue([this, client_fd]() {
+        this->handleClient(client_fd);
+        close(client_fd);
+    });
+}
+
+void Server::setWorkerCount(int n) {
+    if (n < 1) n = 1;
+    if (n > 32) n = 32;
+
+    std::unique_ptr<ThreadPool> oldPool;
+    {
+        std::lock_guard<std::mutex> lock(poolMutex_);
+        workerCount_ = n;
+        oldPool = std::move(pool_);
+        pool_ = std::make_unique<ThreadPool>(static_cast<std::size_t>(n));
+        globalWorkerCount_.store(n);
+        std::cout << "[服务器] 线程池 worker 数已调整为 " << n << std::endl;
+    }
+    // 旧线程池不能由当前 worker 自己 join，否则会死锁。
+    // 放到独立清理线程中析构：当前请求先返回，旧 worker 随后自然退出。
+    if (oldPool) {
+        std::thread([pool = std::move(oldPool)]() mutable {
+            pool.reset();
+        }).detach();
+    }
+}
+
+bool Server::setAllWorkerCounts(int n) {
+    if (n < 1 || n > 32) return false;
+    std::lock_guard<std::mutex> lock(registryMutex_);
+    for (Server* server : instances_) {
+        if (server) server->setWorkerCount(n);
+    }
+    return true;
+}
+
+int Server::currentWorkerCount() {
+    return globalWorkerCount_.load();
+}
 
 void Server::stop() {
     if (is_running) {
         is_running = false;
-        // 为了快速退出 accept 阻塞，可以在这里关闭 server_fd
-        // 这样 accept 会立即返回 -1，循环就会退出
         if (server_fd != -1) {
             close(server_fd);
-            server_fd = -1;   // 避免重复关闭（close 已关闭的 fd 是错误操作）
+            server_fd = -1;
         }
     }
 }
-
