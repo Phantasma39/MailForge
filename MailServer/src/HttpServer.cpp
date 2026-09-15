@@ -1665,6 +1665,8 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         std::atomic<int> smtpOk{0};
         std::atomic<int> smtpFail{0};
         std::atomic<long long> totalLatencyMs{0};
+        std::atomic<long long> totalEncryptMs{0};
+        std::atomic<long long> totalTransferMs{0};
         std::mutex logMutex;
 
         const long long sendStart = nowMs();
@@ -1677,6 +1679,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             benchPool.enqueue([&, i]() {
                 const std::string& sender = senders[static_cast<size_t>(i) % senders.size()];
                 const long long t0 = nowMs();
+                long long encryptMs = 0;
                 std::string subject = "[压测] 第 " + std::to_string(i + 1)
                                     + "/" + std::to_string(kCount) + " 封";
                 std::string raw;
@@ -1688,8 +1691,10 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                           + mimeHeaders + "\r\n" + payload;
                 } else {
                     std::string inner = "Subject: " + subject + "\r\n\r\n" + payload;
+                    const long long encStart = nowMs();
                     std::string cipher =
                         keyReady ? MailCrypto::encryptPayload(inner, symKey, algo) : "";
+                    encryptMs = nowMs() - encStart;
                     if (cipher.empty()) {
                         ++smtpFail;
                         std::lock_guard<std::mutex> lock(logMutex);
@@ -1697,6 +1702,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                                   << mode << ")" << std::endl;
                         return;
                     }
+                    totalEncryptMs += encryptMs;
                     raw = "From: " + sender + "\r\n"
                           "To: " + to + "\r\n"
                           "Subject: [加密邮件]\r\n"
@@ -1704,12 +1710,15 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                           "\r\n" + cipher + "\r\n";
                 }
 
+                const long long t1 = nowMs();
                 SmtpClient smtp(kMailServerIp, kSmtpPort);
                 const bool ok = smtp.sendRawMail(sender, to, raw);
-                const long long el = nowMs() - t0;
+                const long long t2 = nowMs();
+                const long long transferMs = t2 - t1;
                 if (ok) {
                     ++smtpOk;
-                    totalLatencyMs += el;
+                    totalTransferMs += transferMs;
+                    totalLatencyMs += (t2 - t0);
                 } else {
                     ++smtpFail;
                     std::lock_guard<std::mutex> lock(logMutex);
@@ -1725,6 +1734,8 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         const int smtpOkCount = smtpOk.load();
         const int smtpFailCount = smtpFail.load();
         const long long totalLatency = totalLatencyMs.load();
+        const long long totalEncrypt = totalEncryptMs.load();
+        const long long totalTransfer = totalTransferMs.load();
 
         // c) 收件端统计
         int afterCount = 0, received = 0;
@@ -1741,6 +1752,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
 
         // d) 加密轮逐封 RETR 并解密，验证密文可还原
         int decryptOk = 0;
+        long long decryptMsTotal = 0;
         if (isEnc && received > 0) {
             Pop3Client ver(kMailServerIp, kPop3Port);
             if (ver.login(session.user, session.pass)) {
@@ -1750,7 +1762,9 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                     for (size_t k = list.size(); k > 0 && n < received; --k) {
                         std::string raw;
                         if (!ver.retr(list[k - 1].number, raw)) continue;
+                        const long long d0 = nowMs();
                         const DecodedMail dm = decodeMail(raw, session.user);
+                        decryptMsTotal += nowMs() - d0;
                         if (dm.display.find("[压测附件].bin") != std::string::npos)
                             ++decryptOk;
                         ++n;
@@ -1780,13 +1794,23 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         const double lossRate = (lost * 100.0) / kCount;
         const double avgLatencyMs =
             smtpOkCount > 0 ? (double)totalLatency / smtpOkCount : 0.0;
+        const double avgTransferMs =
+            smtpOkCount > 0 ? (double)totalTransfer / smtpOkCount : 0.0;
+        const double avgEncryptMs =
+            smtpOkCount > 0 ? (double)totalEncrypt / smtpOkCount : 0.0;
+        const double avgDecryptMs =
+            decryptOk > 0 ? (double)decryptMsTotal / decryptOk : 0.0;
         const double throughput =
             sendMs > 0 ? (smtpOkCount * 1000.0 / (double)sendMs) : 0.0;
+        const double transferThroughput =
+            totalTransfer > 0 ? (smtpOkCount * 1000.0 / (double)totalTransfer) : 0.0;
+        const long long cryptoMs = totalEncrypt + decryptMsTotal;
 
         std::cout << "[HTTP] 压测轮 " << mode << " 结束：SMTP " << smtpOkCount
                   << "/" << kCount << "，收到 " << received
-                  << "，发送耗时 " << sendMs << "ms，吞吐 "
-                  << throughput << " 封/s" << std::endl;
+                  << "，发送耗时 " << sendMs << "ms，传输耗时 " << totalTransfer
+                  << "ms，加密 " << totalEncrypt << "ms，解密 " << decryptMsTotal
+                  << "ms，吞吐 " << throughput << " 封/s" << std::endl;
 
         return std::string("{")
             + "\"mode\":\"" + mode + "\""
@@ -1802,8 +1826,16 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             + ",\"lost\":" + std::to_string(lost)
             + ",\"lossRate\":" + std::to_string(lossRate)
             + ",\"avgLatencyMs\":" + std::to_string(avgLatencyMs)
+            + ",\"avgTransferMs\":" + std::to_string(avgTransferMs)
+            + ",\"avgEncryptMs\":" + std::to_string(avgEncryptMs)
+            + ",\"avgDecryptMs\":" + std::to_string(avgDecryptMs)
+            + ",\"encryptMs\":" + std::to_string(totalEncrypt)
+            + ",\"decryptMs\":" + std::to_string(decryptMsTotal)
+            + ",\"cryptoMs\":" + std::to_string(cryptoMs)
+            + ",\"transferMs\":" + std::to_string(totalTransfer)
             + ",\"sendMs\":" + std::to_string(sendMs)
             + ",\"throughput\":" + std::to_string(throughput)
+            + ",\"transferThroughput\":" + std::to_string(transferThroughput)
             + ",\"totalMs\":" + std::to_string(nowMs() - sendStart)
             + "}";
     };
