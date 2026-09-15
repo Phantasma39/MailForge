@@ -9,8 +9,11 @@ MailForge HTTP 真实环境多账号收发压测
   python http_mail_bench.py --host 140.143.233.15 --count 100 --size-kb 1024 --threads 4 --accounts 4 --algo aes
 """
 import argparse
+import html as html_mod
 import json
+import os
 import sys
+import webbrowser
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -104,6 +107,159 @@ def download_batch(host, port, user, password, uids, timeout=60):
             pass
     return results
 
+def write_html_report(result, args, path):
+    send = float(result.get("sendAvgMs", 0) or 0)
+    detect = float(result.get("avgDetectionMs", 0) or 0)
+    download = float(result.get("downloadAvgMs", 0) or 0)
+    total = float(result.get("totalAvgMs", 0) or 0)
+    maxv = max(send, detect, download, total, 1.0)
+
+    def bar(label, value, color):
+        width = max(2.0, min(100.0, value / maxv * 100.0))
+        return (
+            '<div class="bar-row">'
+            '<div class="bar-label">%s</div>'
+            '<div class="bar-track"><div class="bar-fill" style="width:%.1f%%;background:%s"></div></div>'
+            '<div class="bar-value">%.0f ms</div>'
+            '</div>' % (label, width, color, value)
+        )
+
+    def badge(ok):
+        return '<span class="badge ok">满足</span>' if ok else '<span class="badge bad">不满足</span>'
+
+    send_pass = send < 2000
+    detect_pass = detect < 2000
+    download_pass = result.get("downloadOk", 0) > 0 and download < 2000
+    total_pass = total > 0 and total < 2000
+
+    per_rows = []
+    for account, st in (result.get("perSender") or {}).items():
+        per_rows.append(
+            '<tr><td>%s</td><td class="ok">%d</td><td class="bad">%d</td></tr>' %
+            (html_mod.escape(str(account)), int(st.get("ok", 0)), int(st.get("fail", 0)))
+        )
+    per_table = "".join(per_rows) or '<tr><td colspan="3" class="muted">无数据</td></tr>'
+
+    download_card = ''
+    if result.get("downloadSample", 0) > 0:
+        download_card = (
+            '<div class="card"><div class="label">平均下载</div><div class="value">%.0f ms</div>'
+            '<div class="sub">%.2f 秒 · %.2f MB/s</div></div>' %
+            (download, download / 1000.0, float(result.get("downloadMBps", 0) or 0))
+        )
+    else:
+        download_card = '<div class="card"><div class="label">平均下载</div><div class="value">未测试</div></div>'
+
+    report = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MailForge 压测报告</title>
+<style>
+  :root{--bg:#f4f7fb;--card:#fff;--line:#e2e8f0;--ink:#1f2937;--muted:#6b7280;--blue:#1f6f8b;--green:#15803d;--red:#b91c1c;--orange:#d97706;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 18px 60px}
+  h1{margin:0 0 4px;font-size:28px}
+  h2{margin:28px 0 12px;font-size:18px}
+  .muted{color:var(--muted)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:0 4px 14px rgba(15,23,42,.04)}
+  .card .label{color:var(--muted);font-size:13px}
+  .card .value{font-size:28px;font-weight:700;margin-top:4px}
+  .card .sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .bar-wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 4px 14px rgba(15,23,42,.04)}
+  .bar-row{display:grid;grid-template-columns:120px 1fr 100px;gap:12px;align-items:center;margin:10px 0}
+  .bar-label{font-weight:600}
+  .bar-track{height:16px;background:#eef2f7;border-radius:8px;overflow:hidden}
+  .bar-fill{height:100%%;border-radius:8px}
+  .bar-value{text-align:right;font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:2px 10px;border-radius:999px;color:#fff;font-size:13px;font-weight:600}
+  .badge.ok{background:var(--green)}
+  .badge.bad{background:var(--red)}
+  table{width:100%%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left}
+  th{background:#f8fafc}
+  td.ok{color:var(--green);font-weight:600} td.bad{color:var(--red);font-weight:600}
+  .foot{margin-top:24px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>MailForge 真实环境压测报告</h1>
+  <div class="muted">目标：%(host)s　|　%(count)d 封 × %(size)d KB　|　%(threads)d 线程　|　%(accounts)d 账号　|　加密：%(algo)s</div>
+
+  <div class="cards">
+    <div class="card"><div class="label">发送成功</div><div class="value">%(send_ok)d / %(count)d</div><div class="sub">成功率 %(send_rate).1f%%</div></div>
+    <div class="card"><div class="label">丢包率</div><div class="value">%(loss).1f%%</div><div class="sub">检测到 %(received)d 封</div></div>
+    <div class="card"><div class="label">平均发送</div><div class="value">%(send).0f ms</div><div class="sub">%(send_s).2f 秒</div></div>
+    <div class="card"><div class="label">平均检测</div><div class="value">%(detect).0f ms</div><div class="sub">%(detect_s).2f 秒</div></div>
+    %(download_card)s
+    <div class="card"><div class="label">上传+下载合计</div><div class="value">%(total).0f ms</div><div class="sub">%(total_s).2f 秒</div></div>
+  </div>
+
+  <h2>耗时对比</h2>
+  <div class="bar-wrap">
+    %(bar_send)s
+    %(bar_detect)s
+    %(bar_download)s
+    %(bar_total)s
+  </div>
+
+  <h2>是否满足 2 秒要求</h2>
+  <table>
+    <tr><th>项目</th><th>平均耗时</th><th>结果</th></tr>
+    <tr><td>发送</td><td>%(send).0f ms</td><td>%(send_badge)s</td></tr>
+    <tr><td>对方检测</td><td>%(detect).0f ms</td><td>%(detect_badge)s</td></tr>
+    <tr><td>完整下载</td><td>%(download).0f ms</td><td>%(download_badge)s</td></tr>
+    <tr><td>上传+下载合计</td><td>%(total).0f ms</td><td>%(total_badge)s</td></tr>
+  </table>
+
+  <h2>各发件账号统计</h2>
+  <table>
+    <tr><th>账号</th><th>成功</th><th>失败</th></tr>
+    %(per_table)s
+  </table>
+
+  <div class="foot">说明：发送和检测反映服务器处理速度；完整下载受公网带宽影响。生成时间：%(now)s</div>
+</div>
+</body>
+</html>''' % {
+        'host': html_mod.escape(str(result.get('host', ''))),
+        'count': int(result.get('count', 0)),
+        'size': int(result.get('sizeKB', 0)),
+        'threads': int(result.get('threads', 0)),
+        'accounts': int(result.get('accounts', 0)),
+        'algo': html_mod.escape(str(result.get('algo', ''))),
+        'send_ok': int(result.get('sendOk', 0)),
+        'send_rate': 100.0 * int(result.get('sendOk', 0)) / max(1, int(result.get('count', 0))),
+        'loss': float(result.get('lossRate', 0) or 0),
+        'received': int(result.get('received', 0)),
+        'send': send,
+        'send_s': send / 1000.0,
+        'detect': detect,
+        'detect_s': detect / 1000.0,
+        'download': download,
+        'download_s': download / 1000.0,
+        'total': total,
+        'total_s': total / 1000.0,
+        'download_card': download_card,
+        'bar_send': bar('发送', send, '#1f6f8b'),
+        'bar_detect': bar('对方检测', detect, '#0ea5a4'),
+        'bar_download': bar('完整下载', download, '#d97706') if result.get('downloadSample', 0) > 0 else '',
+        'bar_total': bar('上传+下载', total, '#7c3aed') if total > 0 else '',
+        'send_badge': badge(send_pass),
+        'detect_badge': badge(detect_pass),
+        'download_badge': badge(download_pass) if result.get('downloadSample', 0) > 0 else '<span class="muted">未测试</span>',
+        'total_badge': badge(total_pass) if total > 0 else '<span class="muted">未测试</span>',
+        'per_table': per_table,
+        'now': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    return path
+
 def pop3_delete_all(host, port, user, password, timeout=30):
     p = poplib.POP3(host, port, timeout=timeout)
     p.user(user)
@@ -132,6 +288,9 @@ def main():
     ap.add_argument("--download-threads", type=int, default=1,
                     help="下载测速并发连接数，默认 1 更接近单封真实下载时间")
     ap.add_argument("--json", action="store_true", help="额外打印原始 JSON")
+    ap.add_argument("--report", default="http_mail_bench_report.html",
+                    help="可视化 HTML 报告输出路径")
+    ap.add_argument("--no-open", action="store_true", help="生成报告后不自动打开浏览器")
     args = ap.parse_args()
 
     # 固定测试账号：第一次运行自动注册，后续复用，避免账号数量不断增加。
@@ -412,6 +571,15 @@ def main():
     with open("http_mail_bench_result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print("结果已写入 http_mail_bench_result.json")
+
+    report_path = os.path.abspath(args.report)
+    write_html_report(result, args, report_path)
+    print("可视化报告已生成：%s" % report_path)
+    if not args.no_open:
+        try:
+            webbrowser.open("file://" + report_path)
+        except Exception:
+            pass
     return 0
 
 if __name__ == "__main__":

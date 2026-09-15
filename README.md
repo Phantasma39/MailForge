@@ -194,3 +194,6 @@ python http_mail_bench.py --host 140.143.233.15 --count 100 --size-kb 1024 --thr
 - 可在服务器启动时通过 MAILFORGE_ADMIN_TOKEN 环境变量修改。
 - 管理员令牌与普通用户 token 分离。
 - 压测脚本中的 --threads 控制客户端 HTTP 并发，不等于服务器线程池大小；服务器线程池请使用管理员界面调整。
+
+
+运行 http_mail_bench.py 后会自动生成可视化报告 http_mail_bench_report.html，包含发送、检测、丢包、完整下载和上传+下载合计平均耗时，并用红绿标签显示是否满足 2 秒要求。
