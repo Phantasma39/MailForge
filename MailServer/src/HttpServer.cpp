@@ -1771,27 +1771,65 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             cnt.quit();
         }
 
-        // d) 加密轮逐封 RETR 并解密，验证密文可还原
+        // d) 加密轮并发 RETR + 解密，验证密文可还原
         int decryptOk = 0;
         long long decryptMsTotal = 0;
+        long long decryptWallMs = 0;
+        int decryptWorkers = 0;
         if (isEnc && received > 0) {
-            Pop3Client ver(kMailServerIp, kPop3Port);
-            if (ver.login(session.user, session.pass)) {
-                std::vector<Pop3MailInfo> list;
-                if (ver.list(list)) {
-                    int n = 0;
-                    for (size_t k = list.size(); k > 0 && n < received; --k) {
-                        std::string raw;
-                        if (!ver.retr(list[k - 1].number, raw)) continue;
-                        const long long d0 = nowMs();
-                        const DecodedMail dm = decodeMail(raw, session.user);
-                        decryptMsTotal += nowMs() - d0;
-                        if (dm.display.find("[压测附件].bin") != std::string::npos)
-                            ++decryptOk;
-                        ++n;
+            std::vector<int> msgNums;
+            {
+                Pop3Client lister(kMailServerIp, kPop3Port);
+                if (lister.login(session.user, session.pass)) {
+                    std::vector<Pop3MailInfo> list;
+                    if (lister.list(list)) {
+                        int n = 0;
+                        for (size_t k = list.size(); k > 0 && n < received; --k) {
+                            msgNums.push_back(list[k - 1].number);
+                            ++n;
+                        }
                     }
+                    lister.quit();
                 }
-                ver.quit();
+            }
+
+            if (!msgNums.empty()) {
+                decryptWorkers = std::min<int>(concurrency, (int)msgNums.size());
+                if (decryptWorkers < 1) decryptWorkers = 1;
+                std::atomic<int> okCount{0};
+                std::atomic<long long> decodeMs{0};
+
+                const long long decryptStart = nowMs();
+                ThreadPool verPool(static_cast<std::size_t>(decryptWorkers));
+                const int totalMsgs = (int)msgNums.size();
+                for (int w = 0; w < decryptWorkers; ++w) {
+                    const int begin = totalMsgs * w / decryptWorkers;
+                    const int end = totalMsgs * (w + 1) / decryptWorkers;
+                    verPool.enqueue([&, begin, end]() {
+                        Pop3Client ver(kMailServerIp, kPop3Port);
+                        if (!ver.login(session.user, session.pass)) return;
+                        long long localDecodeMs = 0;
+                        int localOk = 0;
+                        for (int idx = begin; idx < end; ++idx) {
+                            std::string raw;
+                            if (!ver.retr(msgNums[idx], raw)) continue;
+                            const long long d0 = nowMs();
+                            const DecodedMail dm = decodeMail(raw, session.user);
+                            localDecodeMs += nowMs() - d0;
+                            if (dm.display.find("[压测附件].bin") != std::string::npos) {
+                                ++localOk;
+                            }
+                        }
+                        ver.quit();
+                        decodeMs += localDecodeMs;
+                        okCount += localOk;
+                    });
+                }
+                verPool.waitAll();
+                decryptWallMs = nowMs() - decryptStart;
+                verPool.stop();
+                decryptOk = okCount.load();
+                decryptMsTotal = decodeMs.load();
             }
         }
 
@@ -1867,6 +1905,8 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             + ",\"avgDecryptMs\":" + std::to_string(avgDecryptMs)
             + ",\"encryptMs\":" + std::to_string(totalEncrypt)
             + ",\"decryptMs\":" + std::to_string(decryptMsTotal)
+            + ",\"decryptWallMs\":" + std::to_string(decryptWallMs)
+            + ",\"decryptWorkers\":" + std::to_string(decryptWorkers)
             + ",\"cryptoMs\":" + std::to_string(cryptoMs)
             + ",\"transferMs\":" + std::to_string(totalTransfer)
             + ",\"sendMs\":" + std::to_string(sendMs)
