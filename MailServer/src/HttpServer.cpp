@@ -1611,10 +1611,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
     }
     sendersJson += "]";
 
-    // 多账号同时发送时，至少保证每个账号一个 worker。
-    if ((int)senders.size() > concurrency) {
-        concurrency = std::min(16, (int)senders.size());
-    }
+    // 线程池大小完全由 threads 参数决定；账号只作为发件身份，不改变线程数。
     const bool multi = senders.size() > 1;
 
     const std::string to = session.user + "@example.com";
