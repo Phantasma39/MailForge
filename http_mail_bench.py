@@ -66,27 +66,43 @@ def pop3_uid_map(host, port, user, password, timeout=30):
     p.quit()
     return result
 
-def download_one(host, port, user, password, uid, timeout=60):
-    t0 = time.perf_counter()
+def download_batch(host, port, user, password, uids, timeout=60):
+    """一个线程只开一个 POP3 连接，顺序下载分配给自己的 UID。"""
+    results = []
+    t_conn0 = time.perf_counter()
     try:
         p = poplib.POP3(host, port, timeout=timeout)
         p.user(user)
         p.pass_(password)
-        uid_map = pop3_uid_map(host, port, user, password, timeout)
-        if uid not in uid_map:
-            p.quit()
-            return False, 0, 0, "uid not found"
-        num = uid_map[uid]
-        lines = p.retr(num)[1]
-        size = sum(len(x) + 2 for x in lines)
+        lines = p.uidl()[1]
+        uid_map = {}
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                uid_map[parts[1].decode("utf-8", "ignore")] = int(parts[0])
+
+        for uid in uids:
+            t0 = time.perf_counter()
+            try:
+                if uid not in uid_map:
+                    results.append((False, 0.0, 0, "uid not found"))
+                    continue
+                num = uid_map[uid]
+                lines = p.retr(num)[1]
+                size = sum(len(x) + 2 for x in lines)
+                results.append((True, (time.perf_counter() - t0) * 1000.0, size, ""))
+            except Exception as e:
+                results.append((False, (time.perf_counter() - t0) * 1000.0, 0, str(e)))
         p.quit()
-        return True, (time.perf_counter() - t0) * 1000.0, size, ""
     except Exception as e:
+        # 连接阶段失败：把整个批次标记为失败
+        for _ in uids:
+            results.append((False, (time.perf_counter() - t_conn0) * 1000.0, 0, str(e)))
         try:
             p.quit()
         except Exception:
             pass
-        return False, (time.perf_counter() - t0) * 1000.0, 0, str(e)
+    return results
 
 def pop3_delete_all(host, port, user, password, timeout=30):
     p = poplib.POP3(host, port, timeout=timeout)
@@ -277,22 +293,31 @@ def main():
         n_download = len(events) if args.download_count < 0 else min(args.download_count, len(events))
         if n_download > 0:
             uids_to_download = [uid for uid, _ in events[:n_download]]
-            print("\n[下载测速] 抽样 %d 封，并发 %d ..." % (n_download, args.download_threads))
+            n_threads = max(1, min(args.download_threads, len(uids_to_download)))
+            chunks = []
+            for wi in range(n_threads):
+                begin = len(uids_to_download) * wi // n_threads
+                end = len(uids_to_download) * (wi + 1) // n_threads
+                if begin < end:
+                    chunks.append(uids_to_download[begin:end])
+            print("\n[下载测速] 抽样 %d 封，并发 %d 个 POP3 连接 ..." % (n_download, len(chunks)))
             dwall0 = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=max(1, args.download_threads)) as ex:
-                futs = [ex.submit(download_one, args.host, args.pop3_port, recv_user,
-                                  password, uid, max(60, int(args.timeout))) for uid in uids_to_download]
+            all_results = []
+            with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+                futs = [ex.submit(download_batch, args.host, args.pop3_port, recv_user,
+                                  password, chunk, max(60, int(args.timeout))) for chunk in chunks]
                 for f in as_completed(futs):
-                    okd, ms, nbytes, err = f.result()
-                    if okd:
-                        download_ok += 1
-                        download_ms_sum += ms
-                        download_bytes += nbytes
-                    else:
-                        download_fail += 1
-                        if download_fail <= 5:
-                            print("  [download fail] " + err)
+                    all_results.extend(f.result())
             download_wall_ms = (time.perf_counter() - dwall0) * 1000.0
+            for okd, ms, nbytes, err in all_results:
+                if okd:
+                    download_ok += 1
+                    download_ms_sum += ms
+                    download_bytes += nbytes
+                else:
+                    download_fail += 1
+                    if download_fail <= 5:
+                        print("  [download fail] " + err)
             download_count_actual = n_download
             print("[下载测速] 成功=%d/%d 平均=%.1f ms 下载墙钟=%.1f ms" %
                   (download_ok, n_download,
