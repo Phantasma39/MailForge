@@ -9,9 +9,11 @@ MailForge HTTP 真实环境多账号收发压测
   python http_mail_bench.py --host 140.143.233.15 --count 100 --size-kb 1024 --threads 4 --accounts 4 --algo aes
 """
 import argparse
+import datetime
 import html as html_mod
 import json
 import os
+import subprocess
 import sys
 import webbrowser
 try:
@@ -106,6 +108,125 @@ def download_batch(host, port, user, password, uids, timeout=60):
         except Exception:
             pass
     return results
+
+def tex_escape(s):
+    s = str(s)
+    return (s.replace('\\', r'\textbackslash{}')
+             .replace('&', r'\&')
+             .replace('%', r'\%')
+             .replace('$', r'\$')
+             .replace('#', r'\#')
+             .replace('_', r'\_')
+             .replace('{', r'\{')
+             .replace('}', r'\}'))
+
+def write_pdf_report(result, args, pdf_path):
+    send = float(result.get('sendAvgMs', 0) or 0)
+    detect = float(result.get('avgDetectionMs', 0) or 0)
+    download = float(result.get('downloadAvgMs', 0) or 0)
+    total = float(result.get('totalAvgMs', 0) or 0)
+    send_pass = send < 2000
+    detect_pass = detect < 2000
+    download_pass = result.get('downloadOk', 0) > 0 and download < 2000
+    total_pass = total > 0 and total < 2000
+
+    def yesno(ok):
+        return '是' if ok else '否'
+
+    rows = []
+    rows.append(('发送成功', '%d / %d' % (int(result.get('sendOk', 0)), int(result.get('count', 0))), ''))
+    rows.append(('发送成功率', '%.1f\\%%' % (100.0 * int(result.get('sendOk', 0)) / max(1, int(result.get('count', 0)))), ''))
+    rows.append(('丢包率', '%.1f\\%%' % float(result.get('lossRate', 0) or 0), ''))
+    rows.append(('平均发送', '%.0f ms' % send, yesno(send_pass)))
+    rows.append(('平均检测', '%.0f ms' % detect, yesno(detect_pass)))
+    if result.get('downloadSample', 0) > 0:
+        rows.append(('平均下载', '%.0f ms' % download, yesno(download_pass)))
+        rows.append(('上传+下载合计', '%.0f ms' % total, yesno(total_pass)))
+    else:
+        rows.append(('平均下载', '未测试', ''))
+        rows.append(('上传+下载合计', '未测试', ''))
+
+    table_rows = []
+    for name, value, ok in rows:
+        table_rows.append('%s & %s & %s \\\\' % (tex_escape(name), tex_escape(value), tex_escape(ok)))
+    table_body = '\n'.join(table_rows)
+
+    per_rows = []
+    for account, st in (result.get('perSender') or {}).items():
+        per_rows.append('%s & %d & %d \\\\' % (tex_escape(account), int(st.get('ok', 0)), int(st.get('fail', 0))))
+    per_body = '\n'.join(per_rows) or '无数据 & & \\\\'
+
+    tex = r'''\documentclass[12pt]{article}
+\usepackage[UTF8]{ctex}
+\usepackage[margin=2.2cm]{geometry}
+\begin{document}
+\begin{center}
+{\Large MailForge 压测结果}
+\end{center}
+
+目标：%(host)s\quad 邮件：%(count)d 封 × %(size)d KB\quad 线程：%(threads)d\quad 账号：%(accounts)d\quad 加密：%(algo)s
+
+\vspace{0.6cm}
+\begin{tabular}{|l|l|l|}
+\hline
+项目 & 结果 & 是否满足 <2s \\
+\hline
+%(table)s
+\hline
+\end{tabular}
+
+\vspace{1cm}
+\textbf{各发件账号统计}
+
+\vspace{0.3cm}
+\begin{tabular}{|l|l|l|}
+\hline
+账号 & 成功 & 失败 \\
+\hline
+%(per)s
+\hline
+\end{tabular}
+
+\vspace{0.8cm}
+说明：发送和检测反映服务器处理速度；完整下载受公网带宽影响。
+
+\end{document}
+''' % {
+        'host': tex_escape(result.get('host', '')),
+        'count': int(result.get('count', 0)),
+        'size': int(result.get('sizeKB', 0)),
+        'threads': int(result.get('threads', 0)),
+        'accounts': int(result.get('accounts', 0)),
+        'algo': tex_escape(result.get('algo', '')),
+        'table': table_body,
+        'per': per_body,
+    }
+
+    tex_path = pdf_path[:-4] + '.tex'
+    with open(tex_path, 'w', encoding='utf-8') as f:
+        f.write(tex)
+
+    try:
+        proc = subprocess.run(
+            ['xelatex', '-interaction=nonstopmode', '-halt-on-error', os.path.basename(tex_path)],
+            cwd=os.path.dirname(os.path.abspath(tex_path)),
+            capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            print('[PDF] xelatex 编译失败，保留 tex 文件：' + tex_path)
+            print(proc.stdout[-1000:])
+            return None
+        for ext in ['.aux', '.log', '.out', '.toc']:
+            try:
+                os.remove(pdf_path[:-4] + ext)
+            except OSError:
+                pass
+        return pdf_path
+    except FileNotFoundError:
+        print('[PDF] 未找到 xelatex，请安装 TeX Live 或 MiKTeX；已保留 tex 文件：' + tex_path)
+        return None
+    except Exception as e:
+        print('[PDF] 生成失败：%s；已保留 tex 文件：%s' % (e, tex_path))
+        return None
 
 def write_html_report(result, args, path):
     send = float(result.get("sendAvgMs", 0) or 0)
@@ -223,9 +344,8 @@ def main():
     ap.add_argument("--download-threads", type=int, default=1,
                     help="下载测速并发连接数，默认 1 更接近单封真实下载时间")
     ap.add_argument("--json", action="store_true", help="额外打印原始 JSON")
-    ap.add_argument("--report", default="http_mail_bench_report.html",
-                    help="可视化 HTML 报告输出路径")
-    ap.add_argument("--no-open", action="store_true", help="生成报告后不自动打开浏览器")
+    ap.add_argument("--report", default="", help="PDF 报告输出路径，默认按当前时间命名")
+    ap.add_argument("--no-open", action="store_true", help="兼容参数，PDF 生成后不自动打开")
     args = ap.parse_args()
 
     # 固定测试账号：第一次运行自动注册，后续复用，避免账号数量不断增加。
@@ -507,14 +627,14 @@ def main():
         json.dump(result, f, ensure_ascii=False, indent=2)
     print("结果已写入 http_mail_bench_result.json")
 
-    report_path = os.path.abspath(args.report)
-    write_html_report(result, args, report_path)
-    print("可视化报告已生成：%s" % report_path)
-    if not args.no_open:
-        try:
-            webbrowser.open("file://" + report_path)
-        except Exception:
-            pass
+    if args.report:
+        report_path = os.path.abspath(args.report)
+    else:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.abspath("mail_bench_report_" + stamp + ".pdf")
+    pdf_path = write_pdf_report(result, args, report_path)
+    if pdf_path:
+        print("PDF 报告已生成：%s" % pdf_path)
     return 0
 
 if __name__ == "__main__":
