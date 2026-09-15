@@ -135,8 +135,8 @@ def write_pdf_report(result, args, pdf_path):
 
     rows = []
     rows.append(('发送成功', '%d / %d' % (int(result.get('sendOk', 0)), int(result.get('count', 0))), ''))
-    rows.append(('发送成功率', '%.1f\\%%' % (100.0 * int(result.get('sendOk', 0)) / max(1, int(result.get('count', 0)))), ''))
-    rows.append(('丢包率', '%.1f\\%%' % float(result.get('lossRate', 0) or 0), ''))
+    rows.append(('发送成功率', '%.1f%%' % (100.0 * int(result.get('sendOk', 0)) / max(1, int(result.get('count', 0)))), ''))
+    rows.append(('丢包率', '%.1f%%' % float(result.get('lossRate', 0) or 0), ''))
     rows.append(('平均发送', '%.0f ms' % send, yesno(send_pass)))
     rows.append(('平均检测', '%.0f ms' % detect, yesno(detect_pass)))
     if result.get('downloadSample', 0) > 0:
