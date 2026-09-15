@@ -1534,28 +1534,6 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    // ---------- 外部网络模式：目标为公网地址时，服务器会真正走公网地址连接 ----------
-    const bool external = (getParam(req, "external") == "1" ||
-                           getParam(req, "external") == "true" ||
-                           getParam(req, "external") == "yes");
-    std::string targetHost = getParam(req, "target");
-    if (targetHost.empty()) {
-        if (const char* env = std::getenv("MAILFORGE_PUBLIC_HOST")) targetHost = env;
-    }
-    int benchSmtpPort = atoi(getParam(req, "smtpPort").c_str());
-    if (benchSmtpPort <= 0) benchSmtpPort = 2525;
-    int benchPop3Port = atoi(getParam(req, "pop3Port").c_str());
-    if (benchPop3Port <= 0) benchPop3Port = 1110;
-    std::string benchHost = "127.0.0.1";
-    if (external) {
-        if (targetHost.empty()) {
-            resp.body = jsonResult(false,
-                "外部网络模式需要 target 参数，或设置 MAILFORGE_PUBLIC_HOST 环境变量");
-            return;
-        }
-        benchHost = targetHost;
-    }
-
     const int kCount = 100;              // 每种模式共发送 100 封
     const size_t kFileBytes = 786432;    // 附件原始文件 786KB，Base64 后约 1MB
 
@@ -1654,7 +1632,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
 
     // 预检：账号能登录 POP3（后续统计也依赖它）
     {
-        Pop3Client pre(benchHost, benchPop3Port);
+        Pop3Client pre(kMailServerIp, kPop3Port);
         if (!pre.login(session.user, session.pass)) {
             resp.body = jsonResult(false, "压测前登录失败，请确认账号密码正确");
             return;
@@ -1689,7 +1667,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         int baseCount = 0;
         long long baseBytes = 0;
         {
-            Pop3Client cnt(benchHost, benchPop3Port);
+            Pop3Client cnt(kMailServerIp, kPop3Port);
             if (!cnt.login(session.user, session.pass)) return "";
             cnt.stat(baseCount, baseBytes);
             cnt.quit();
@@ -1748,7 +1726,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                 }
 
                 const long long t1 = nowMs();
-                SmtpClient smtp(benchHost, benchSmtpPort);
+                SmtpClient smtp(kMailServerIp, kSmtpPort);
                 const bool ok = smtp.sendRawMail(sender, to, raw);
                 const long long t2 = nowMs();
                 const long long transferMs = t2 - t1;
@@ -1784,7 +1762,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         int afterCount = 0, received = 0;
         long long afterBytes = 0;
         {
-            Pop3Client cnt(benchHost, benchPop3Port);
+            Pop3Client cnt(kMailServerIp, kPop3Port);
             if (cnt.login(session.user, session.pass) &&
                 cnt.stat(afterCount, afterBytes)) {
                 received = afterCount - baseCount;
@@ -1801,7 +1779,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         if (isEnc && received > 0) {
             std::vector<int> msgNums;
             {
-                Pop3Client lister(benchHost, benchPop3Port);
+                Pop3Client lister(kMailServerIp, kPop3Port);
                 if (lister.login(session.user, session.pass)) {
                     std::vector<Pop3MailInfo> list;
                     if (lister.list(list)) {
@@ -1828,7 +1806,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                     const int begin = totalMsgs * w / decryptWorkers;
                     const int end = totalMsgs * (w + 1) / decryptWorkers;
                     verPool.enqueue([&, begin, end]() {
-                        Pop3Client ver(benchHost, benchPop3Port);
+                        Pop3Client ver(kMailServerIp, kPop3Port);
                         if (!ver.login(session.user, session.pass)) return;
                         long long localDecodeMs = 0;
                         int localOk = 0;
@@ -1857,7 +1835,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
 
         // e) 清理本轮测试邮件
         if (received > 0) {
-            Pop3Client cleaner(benchHost, benchPop3Port);
+            Pop3Client cleaner(kMailServerIp, kPop3Port);
             if (cleaner.login(session.user, session.pass)) {
                 std::vector<Pop3MailInfo> list;
                 if (cleaner.list(list)) {
@@ -1911,8 +1889,6 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             + "\"mode\":\"" + mode + "\""
             + ",\"encrypted\":" + (isEnc ? "true" : "false")
             + ",\"count\":" + std::to_string(kCount)
-            + ",\"external\":" + (external ? "true" : "false")
-            + ",\"target\":\"" + jsonEscape(benchHost) + "\""
             + ",\"threads\":" + std::to_string(concurrency)
             + ",\"multi\":" + (multi ? "true" : "false")
             + ",\"senders\":" + sendersJson

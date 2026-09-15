@@ -167,12 +167,3 @@ make clean         # 清理全部产物
 - POP3 TOP：只取邮件头和正文前 N 行，适合快速预览。
 
 说明：STARTTLS/STLS 需要证书与更完整的 TLS 连接抽象；公网投递还受 25 端口、公网 IP、DNS MX、SPF/DKIM/DMARC 等条件限制，本项目以本地/内网演示为主。
-
-## 外部网络压测模式
-
-/api/benchmark 新增 external=1 与 	arget=公网地址 参数：
-
-- 默认 external=0：SMTP/POP3 连接 127.0.0.1，测服务器内部性能。
-- external=1：SMTP/POP3 连接 	arget 指定的公网地址，走真实公网链路。
-- 示例：/api/benchmark?token=xxx&encrypt=plain&threads=4&accountCount=2&external=1&target=140.143.233.15。
-- 也可以通过服务器环境变量 MAILFORGE_PUBLIC_HOST 设置外部模式默认目标地址。
