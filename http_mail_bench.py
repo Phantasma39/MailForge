@@ -110,6 +110,7 @@ def main():
                     help="下载测速的邮件封数，0 表示全部下载")
     ap.add_argument("--download-threads", type=int, default=1,
                     help="下载测速并发连接数，默认 1 更接近单封真实下载时间")
+    ap.add_argument("--json", action="store_true", help="额外打印原始 JSON")
     args = ap.parse_args()
 
     tag = str(int(time.time()))[-8:]
@@ -300,8 +301,65 @@ def main():
     result["downloadAvgMs"] = download_ms_sum / max(1, download_ok)
     result["downloadMBps"] = (download_bytes / 1048576.0) / max(0.001, download_wall_ms / 1000.0)
 
-    print("[4/4] 结果:")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    def mark(ok):
+        return "满足" if ok else "不满足"
+
+    send_avg_s = result["sendAvgMs"] / 1000.0
+    detect_avg_s = result["avgDetectionMs"] / 1000.0
+    download_avg_s = result["downloadAvgMs"] / 1000.0
+    send_pass = result["sendAvgMs"] < 2000.0
+    detect_pass = result["avgDetectionMs"] < 2000.0
+    download_pass = (result["downloadOk"] > 0 and download_avg_s < 2.0)
+
+    print()
+    print("=" * 60)
+    print("测试结果")
+    print("=" * 60)
+    print("目标服务器：%s" % args.host)
+    print("发送账号数：%d" % args.accounts)
+    print("发送线程数：%d" % args.threads)
+    print("发送邮件数：%d" % args.count)
+    print("每封大小：%d KB" % args.size_kb)
+    print("加密方式：%s" % args.algo)
+    print()
+    print("【发送结果】")
+    print("  发送成功：%d" % result["sendOk"])
+    print("  发送失败：%d" % result["sendFail"])
+    print("  发送成功率：%.1f%%" % (100.0 * result["sendOk"] / max(1, result["count"])))
+    print("  发送总耗时：%.2f 秒" % (result["sendWallMs"] / 1000.0))
+    print("  平均每封发送：%.0f 毫秒（%.2f 秒）" % (result["sendAvgMs"], send_avg_s))
+    print("  发送速度：%.2f 封/秒" % result["sendThroughput"])
+    print()
+    print("【对方检测结果】")
+    print("  检测到邮件：%d" % result["received"])
+    print("  丢包率：%.1f%%" % result["lossRate"])
+    print("  从开始发送到全部检测完成：%.2f 秒" % (result["detectionTotalMs"] / 1000.0))
+    print("  平均检测延迟：%.0f 毫秒（%.2f 秒）" % (result["avgDetectionMs"], detect_avg_s))
+    print()
+    print("【完整下载结果】")
+    if result["downloadSample"] > 0:
+        print("  抽样下载：%d 封" % result["downloadSample"])
+        print("  下载成功：%d" % result["downloadOk"])
+        print("  下载失败：%d" % result["downloadFail"])
+        print("  平均每封下载：%.0f 毫秒（%.2f 秒）" % (result["downloadAvgMs"], download_avg_s))
+        print("  下载总耗时：%.2f 秒" % (result["downloadWallMs"] / 1000.0))
+        print("  下载速度：%.2f MB/s" % result["downloadMBps"])
+    else:
+        print("  未进行下载测速")
+    print()
+    print("【是否满足 2 秒要求】")
+    print("  发送 <2s：%s" % mark(send_pass))
+    print("  对方检测 <2s：%s" % mark(detect_pass))
+    if result["downloadSample"] > 0:
+        print("  完整下载 <2s：%s" % mark(download_pass))
+    print()
+    print("说明：发送和检测主要反映服务器处理速度；完整下载受公网带宽影响。")
+    print("=" * 60)
+
+    if args.json:
+        print()
+        print("原始 JSON：")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
     if not args.keep:
         try:
