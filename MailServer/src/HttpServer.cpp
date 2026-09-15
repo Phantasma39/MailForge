@@ -1582,14 +1582,14 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         }
     };
 
-    const bool multi = multiParam || !getParam(req, "accounts").empty();
-    if (multi) {
-        // 默认使用当前账号 + alice + bob 作为多个发件账号。
+    std::string accountsParam = getParam(req, "accounts");
+    const bool accountsProvided = !accountsParam.empty();
+    if (!accountsProvided && multiParam) {
+        // 未显式选择账号时，使用当前账号 + alice + bob。
         addSender(session.user);
         addSender("alice");
         addSender("bob");
     }
-    std::string accountsParam = getParam(req, "accounts");
     if (!accountsParam.empty()) {
         size_t pos = 0;
         while (pos <= accountsParam.size()) {
@@ -1610,6 +1610,12 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         sendersJson += "\"" + jsonEscape(senders[i]) + "\"";
     }
     sendersJson += "]";
+
+    // 多账号同时发送时，至少保证每个账号一个 worker。
+    if ((int)senders.size() > concurrency) {
+        concurrency = std::min(16, (int)senders.size());
+    }
+    const bool multi = senders.size() > 1;
 
     const std::string to = session.user + "@example.com";
 
@@ -1668,6 +1674,9 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         std::atomic<long long> totalEncryptMs{0};
         std::atomic<long long> totalTransferMs{0};
         std::mutex logMutex;
+        std::mutex senderStatsMutex;
+        std::map<std::string, int> senderOk;
+        std::map<std::string, int> senderFail;
 
         const long long sendStart = nowMs();
         std::cout << "[HTTP] 压测轮 " << mode << "：线程数 " << concurrency
@@ -1719,8 +1728,14 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
                     ++smtpOk;
                     totalTransferMs += transferMs;
                     totalLatencyMs += (t2 - t0);
+                    std::lock_guard<std::mutex> lock(senderStatsMutex);
+                    senderOk[sender]++;
                 } else {
                     ++smtpFail;
+                    {
+                        std::lock_guard<std::mutex> lock(senderStatsMutex);
+                        senderFail[sender]++;
+                    }
                     std::lock_guard<std::mutex> lock(logMutex);
                     std::cerr << "[HTTP] 第" << (i + 1) << "封发送失败: "
                               << smtp.getLastError() << std::endl;
@@ -1806,6 +1821,20 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             totalTransfer > 0 ? (smtpOkCount * 1000.0 / (double)totalTransfer) : 0.0;
         const long long cryptoMs = totalEncrypt + decryptMsTotal;
 
+        std::string senderStatsJson = "[";
+        for (size_t si = 0; si < senders.size(); ++si) {
+            if (si) senderStatsJson += ",";
+            int okN = 0, failN = 0;
+            auto itOk = senderOk.find(senders[si]);
+            if (itOk != senderOk.end()) okN = itOk->second;
+            auto itFail = senderFail.find(senders[si]);
+            if (itFail != senderFail.end()) failN = itFail->second;
+            senderStatsJson += std::string("{\"account\":\"") + jsonEscape(senders[si])
+                             + "\",\"ok\":" + std::to_string(okN)
+                             + ",\"fail\":" + std::to_string(failN) + "}";
+        }
+        senderStatsJson += "]";
+
         std::cout << "[HTTP] 压测轮 " << mode << " 结束：SMTP " << smtpOkCount
                   << "/" << kCount << "，收到 " << received
                   << "，发送耗时 " << sendMs << "ms，传输耗时 " << totalTransfer
@@ -1817,8 +1846,9 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             + ",\"encrypted\":" + (isEnc ? "true" : "false")
             + ",\"count\":" + std::to_string(kCount)
             + ",\"threads\":" + std::to_string(concurrency)
-            + ",\"multi\":" + (senders.size() > 1 ? "true" : "false")
+            + ",\"multi\":" + (multi ? "true" : "false")
             + ",\"senders\":" + sendersJson
+            + ",\"senderStats\":" + senderStatsJson
             + ",\"smtpOk\":" + std::to_string(smtpOkCount)
             + ",\"smtpFail\":" + std::to_string(smtpFailCount)
             + ",\"received\":" + std::to_string(received)
@@ -1857,7 +1887,7 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
         std::string("{\"ok\":true")
         + ",\"modes\":[" + resultsJson + "]"
         + ",\"threads\":" + std::to_string(concurrency)
-        + ",\"multi\":" + (senders.size() > 1 ? "true" : "false")
+        + ",\"multi\":" + (multi ? "true" : "false")
         + ",\"senders\":" + sendersJson
         + ",\"sizeBytes\":" + std::to_string(mailBytes)
         + ",\"count\":\"" + modeParam + "\""

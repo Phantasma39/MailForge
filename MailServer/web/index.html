@@ -307,9 +307,13 @@
             <option value="16">16 线程</option>
           </select>
         </div>
+        <div class="field">
+          <label>多账号同时发送（逗号分隔，每个账号至少一个线程）</label>
+          <input id="benchAccounts" value="alice,bob">
+        </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
-          <input type="checkbox" id="benchMulti" style="width:auto;margin:0">
-          <label style="margin:0">多账号发送：alice / bob 轮询作为发件人（SMTP 不校验发件账号）</label>
+          <input type="checkbox" id="benchMulti" checked style="width:auto;margin:0">
+          <label style="margin:0">启用多账号并发模式</label>
         </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
@@ -791,6 +795,7 @@ async function runBench(){
   const mode = $("benchMode").value;
   const threads = $("benchThreads").value;
   const multi = $("benchMulti").checked ? "1" : "0";
+  const accounts = multi === "1" ? $("benchAccounts").value.trim() : "";
   const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
   btn.disabled = true;
   box.style.display = "none";
@@ -801,7 +806,8 @@ async function runBench(){
     // 与发信一致：压测请求/结果可选走 Web 与服务器之间的 RSA 信封（层1）
     const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode)
                                  + "&threads=" + encodeURIComponent(threads)
-                                 + "&multi=" + encodeURIComponent(multi),
+                                 + "&multi=" + encodeURIComponent(multi)
+                                 + (accounts ? "&accounts=" + encodeURIComponent(accounts) : ""),
                                  null, $("benchRsa").checked);
     if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
     if (!j || !Array.isArray(j.modes)){
@@ -813,6 +819,8 @@ async function runBench(){
     setMsg("benchMsg", "", false);
     const mb = (j.sizeBytes / 1048576).toFixed(2);
     const nameOf = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20" };
+    const senderStats = (j.modes[0] && j.modes[0].senderStats) || [];
+    const senderStatText = senderStats.map(s => s.account + " " + s.ok + " 成功 / " + s.fail + " 失败").join("；");
     let rows = "";
     let timeRows = "";
     for (const m of j.modes){
@@ -847,6 +855,7 @@ async function runBench(){
       "<th>模式</th><th>传输时间</th><th>加密时间</th><th>解密时间</th><th>加密+解密</th>" +
       "<th>传输速度</th><th>平均每封传输</th></tr>" +
       timeRows + "</table>" +
+      "<p class='muted'>账号统计：" + (senderStatText || "—") + "</p>" +
       "<p class='muted'>总耗时 " + (j.totalMs/1000).toFixed(1) + " 秒</p>";
   }catch(e){
     setMsg("benchMsg", "压测请求失败: " + e, true);
