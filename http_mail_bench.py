@@ -118,10 +118,11 @@ def main():
     ap.add_argument("--json", action="store_true", help="额外打印原始 JSON")
     args = ap.parse_args()
 
+    # 固定测试账号：第一次运行自动注册，后续复用，避免账号数量不断增加。
     tag = str(int(time.time()))[-8:]
     password = "Bench123456"
-    recv_user = "netbench_recv_" + tag
-    send_users = ["netbench_s%d_%s" % (i + 1, tag) for i in range(max(1, args.accounts))]
+    recv_user = "netbench_recv"
+    send_users = ["netbench_s%d" % (i + 1) for i in range(max(1, args.accounts))]
     recv_email = recv_user + "@example.com"
 
     print("=" * 76)
