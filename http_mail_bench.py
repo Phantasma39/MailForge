@@ -10,6 +10,11 @@ MailForge HTTP 真实环境多账号收发压测
 """
 import argparse
 import json
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 import poplib
 import threading
 import time
@@ -300,6 +305,10 @@ def main():
     result["downloadWallMs"] = download_wall_ms
     result["downloadAvgMs"] = download_ms_sum / max(1, download_ok)
     result["downloadMBps"] = (download_bytes / 1048576.0) / max(0.001, download_wall_ms / 1000.0)
+    if download_ok > 0:
+        result["totalAvgMs"] = result["sendAvgMs"] + result["downloadAvgMs"]
+    else:
+        result["totalAvgMs"] = 0.0
 
     def mark(ok):
         return "满足" if ok else "不满足"
@@ -344,6 +353,12 @@ def main():
         print("  平均每封下载：%.0f 毫秒（%.2f 秒）" % (result["downloadAvgMs"], download_avg_s))
         print("  下载总耗时：%.2f 秒" % (result["downloadWallMs"] / 1000.0))
         print("  下载速度：%.2f MB/s" % result["downloadMBps"])
+        print()
+        print("【上传 + 下载总平均用时】")
+        print("  上传平均：%.0f 毫秒（%.2f 秒）" % (result["sendAvgMs"], result["sendAvgMs"] / 1000.0))
+        print("  下载平均：%.0f 毫秒（%.2f 秒）" % (result["downloadAvgMs"], result["downloadAvgMs"] / 1000.0))
+        print("  合计平均：%.0f 毫秒（%.2f 秒）" % (result["totalAvgMs"], result["totalAvgMs"] / 1000.0))
+        print("  上传+下载 <2s：%s" % ("满足" if result["totalAvgMs"] < 2000.0 else "不满足"))
     else:
         print("  未进行下载测速")
     print()
