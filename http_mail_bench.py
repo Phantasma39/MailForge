@@ -17,6 +17,9 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# poplib 默认单行上限约 2KB；压测邮件正文可能是一整行，这里放大到 16MB。
+poplib._MAXLINE = 16 * 1024 * 1024
+
 def http_post(host, port, path, data, timeout=180):
     body = urllib.parse.urlencode(data).encode("utf-8")
     req = urllib.request.Request("http://%s:%d%s" % (host, port, path), data=body)
@@ -45,6 +48,41 @@ def pop3_uids(host, port, user, password, timeout=30):
     p.quit()
     return uids
 
+def pop3_uid_map(host, port, user, password, timeout=30):
+    p = poplib.POP3(host, port, timeout=timeout)
+    p.user(user)
+    p.pass_(password)
+    lines = p.uidl()[1]
+    result = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2:
+            result[parts[1].decode("utf-8", "ignore")] = int(parts[0])
+    p.quit()
+    return result
+
+def download_one(host, port, user, password, uid, timeout=60):
+    t0 = time.perf_counter()
+    try:
+        p = poplib.POP3(host, port, timeout=timeout)
+        p.user(user)
+        p.pass_(password)
+        uid_map = pop3_uid_map(host, port, user, password, timeout)
+        if uid not in uid_map:
+            p.quit()
+            return False, 0, 0, "uid not found"
+        num = uid_map[uid]
+        lines = p.retr(num)[1]
+        size = sum(len(x) + 2 for x in lines)
+        p.quit()
+        return True, (time.perf_counter() - t0) * 1000.0, size, ""
+    except Exception as e:
+        try:
+            p.quit()
+        except Exception:
+            pass
+        return False, (time.perf_counter() - t0) * 1000.0, 0, str(e)
+
 def pop3_delete_all(host, port, user, password, timeout=30):
     p = poplib.POP3(host, port, timeout=timeout)
     p.user(user)
@@ -68,6 +106,10 @@ def main():
     ap.add_argument("--poll", type=float, default=0.2, help="POP3 轮询间隔秒")
     ap.add_argument("--timeout", type=float, default=300.0, help="整体超时秒")
     ap.add_argument("--keep", action="store_true", help="保留测试账号和邮件，默认清理收件账号邮件")
+    ap.add_argument("--download-count", type=int, default=10,
+                    help="下载测速的邮件封数，0 表示全部下载")
+    ap.add_argument("--download-threads", type=int, default=1,
+                    help="下载测速并发连接数，默认 1 更接近单封真实下载时间")
     args = ap.parse_args()
 
     tag = str(int(time.time()))[-8:]
@@ -218,6 +260,46 @@ def main():
         "avgReceiveMs": avg_e2e * 1000.0,
         "perSender": per_sender,
     }
+    download_ok = 0
+    download_fail = 0
+    download_ms_sum = 0.0
+    download_bytes = 0
+    download_wall_ms = 0.0
+    download_count_actual = 0
+    if args.download_count != 0 and received > 0:
+        n_download = len(events) if args.download_count < 0 else min(args.download_count, len(events))
+        if n_download > 0:
+            uids_to_download = [uid for uid, _ in events[:n_download]]
+            print("\n[下载测速] 抽样 %d 封，并发 %d ..." % (n_download, args.download_threads))
+            dwall0 = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=max(1, args.download_threads)) as ex:
+                futs = [ex.submit(download_one, args.host, args.pop3_port, recv_user,
+                                  password, uid, max(60, int(args.timeout))) for uid in uids_to_download]
+                for f in as_completed(futs):
+                    okd, ms, nbytes, err = f.result()
+                    if okd:
+                        download_ok += 1
+                        download_ms_sum += ms
+                        download_bytes += nbytes
+                    else:
+                        download_fail += 1
+                        if download_fail <= 5:
+                            print("  [download fail] " + err)
+            download_wall_ms = (time.perf_counter() - dwall0) * 1000.0
+            download_count_actual = n_download
+            print("[下载测速] 成功=%d/%d 平均=%.1f ms 下载墙钟=%.1f ms" %
+                  (download_ok, n_download,
+                   download_ms_sum / max(1, download_ok), download_wall_ms))
+
+    result["detectionTotalMs"] = result.get("e2eTotalMs", 0)
+    result["avgDetectionMs"] = result.get("avgReceiveMs", 0)
+    result["downloadSample"] = download_count_actual
+    result["downloadOk"] = download_ok
+    result["downloadFail"] = download_fail
+    result["downloadWallMs"] = download_wall_ms
+    result["downloadAvgMs"] = download_ms_sum / max(1, download_ok)
+    result["downloadMBps"] = (download_bytes / 1048576.0) / max(0.001, download_wall_ms / 1000.0)
+
     print("[4/4] 结果:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
