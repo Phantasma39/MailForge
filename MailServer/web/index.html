@@ -316,6 +316,14 @@
             <option value="4">4 个账号（alice、bob、carol、dave）</option>
           </select>
         </div>
+        <div class="field">
+          <label>外部网络模式目标地址（勾选后 SMTP/POP3 连接该公网地址）</label>
+          <input id="benchTarget" value="140.143.233.15">
+        </div>
+        <div class="field" style="display:flex;gap:10px;align-items:center">
+          <input type="checkbox" id="benchExternal" style="width:auto;margin:0">
+          <label style="margin:0">启用外部网络模式</label>
+        </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
           <label style="margin:0">层1：压测请求/结果走 Web 与服务器之间的 RSA 信封（与发信一致，可关）</label>
@@ -796,17 +804,22 @@ async function runBench(){
   const mode = $("benchMode").value;
   const threads = $("benchThreads").value;
   const accountCount = $("benchAccountCount").value;
+  const external = $("benchExternal").checked ? "1" : "0";
+  const target = $("benchTarget").value.trim();
   const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
   btn.disabled = true;
   box.style.display = "none";
   setMsg("benchMsg", "压测进行中（" + (names[mode] || mode) +
          "，" + threads + " 线程，" + accountCount + " 个发件账号" +
+         (external === "1" ? "，外部模式 " + target : "，本机模式") +
          "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
   try{
     // 与发信一致：压测请求/结果可选走 Web 与服务器之间的 RSA 信封（层1）
     const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode)
                                  + "&threads=" + encodeURIComponent(threads)
-                                 + "&accountCount=" + encodeURIComponent(accountCount),
+                                 + "&accountCount=" + encodeURIComponent(accountCount)
+                                 + "&external=" + encodeURIComponent(external)
+                                 + (target ? "&target=" + encodeURIComponent(target) : ""),
                                  null, $("benchRsa").checked);
     if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
     if (!j || !Array.isArray(j.modes)){
