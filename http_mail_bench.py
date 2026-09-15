@@ -326,6 +326,54 @@ def pop3_delete_all(host, port, user, password, timeout=30):
     p.quit()
     return count
 
+def ask(prompt, default):
+    s = input("%s [%s]: " % (prompt, default)).strip()
+    return s if s else str(default)
+
+def ask_int(prompt, default, low, high):
+    while True:
+        s = ask(prompt, default)
+        try:
+            v = int(s)
+        except ValueError:
+            print("  请输入数字。")
+            continue
+        if low <= v <= high:
+            return v
+        print("  请输入 %d~%d 之间的数字。" % (low, high))
+
+def ask_choice(prompt, default, choices):
+    cset = [c.lower() for c in choices]
+    while True:
+        s = ask(prompt, default).strip().lower()
+        if s in cset:
+            return s
+        print("  请输入：" + " / ".join(choices))
+
+def interactive_setup(args):
+    print("=" * 60)
+    print("MailForge 压测交互模式")
+    print("直接回车使用默认值。")
+    print("=" * 60)
+    args.host = ask("服务器地址", args.host)
+    args.http_port = ask_int("HTTP 端口", args.http_port, 1, 65535)
+    args.count = ask_int("发送邮件数", args.count, 1, 10000)
+    args.size_kb = ask_int("每封邮件大小 KB", args.size_kb, 1, 4096)
+    args.threads = ask_int("客户端发送线程数", args.threads, 1, 64)
+    args.accounts = ask_int("发件账号数量", args.accounts, 1, 8)
+    args.algo = ask_choice("加密方式 none/aes/chacha", args.algo, ["none", "aes", "chacha"])
+    args.download_count = ask_int("下载测速抽样封数（0=不下载）", args.download_count, 0, 10000)
+    if args.download_count != 0:
+        args.download_threads = ask_int("下载并发连接数", args.download_threads, 1, 16)
+    print()
+    print("配置确认：")
+    print("  服务器：%s:%d" % (args.host, args.http_port))
+    print("  邮件：%d 封 × %d KB" % (args.count, args.size_kb))
+    print("  发送：%d 线程，%d 个账号" % (args.threads, args.accounts))
+    print("  加密：%s" % args.algo)
+    print("  下载抽样：%d 封，并发 %d" % (args.download_count, args.download_threads))
+    input("按回车开始测试...")
+
 def main():
     ap = argparse.ArgumentParser(description="MailForge HTTP multi-account send/receive benchmark")
     ap.add_argument("--host", default="140.143.233.15")
@@ -346,7 +394,11 @@ def main():
     ap.add_argument("--json", action="store_true", help="额外打印原始 JSON")
     ap.add_argument("--report", default="", help="PDF 报告输出路径，默认按当前时间命名")
     ap.add_argument("--no-open", action="store_true", help="兼容参数，PDF 生成后不自动打开")
+    ap.add_argument("--interactive", action="store_true", help="使用交互式问答模式")
     args = ap.parse_args()
+
+    if args.interactive or len(sys.argv) == 1:
+        interactive_setup(args)
 
     # 固定测试账号：第一次运行自动注册，后续复用，避免账号数量不断增加。
     tag = str(int(time.time()))[-8:]
