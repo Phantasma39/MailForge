@@ -177,3 +177,11 @@ python crypto_bench_client.py --host 140.143.233.15 --user alice --password 1234
 `
 
 参数：lgo=aes|chacha|all、count=100、sizeKB=1024、	hreads=1/2/4/8/16。
+
+## HTTP 多账号真实收发压测
+
+新增 http_mail_bench.py：自动注册测试账号，通过 8080 /api/send 多账号并发发送，通过 POP3 1110 轮询收件，统计发送成功率、接收数、端到端完成时间和平均接收延迟。
+
+`ash
+python http_mail_bench.py --host 140.143.233.15 --count 100 --size-kb 1024 --threads 4 --accounts 4 --algo aes
+`
