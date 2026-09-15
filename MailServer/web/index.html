@@ -308,12 +308,13 @@
           </select>
         </div>
         <div class="field">
-          <label>多账号并发发送（线程数固定，账号作为发件身份轮询使用）</label>
-          <input id="benchAccounts" value="alice,bob">
-        </div>
-        <div class="field" style="display:flex;gap:10px;align-items:center">
-          <input type="checkbox" id="benchMulti" checked style="width:auto;margin:0">
-          <label style="margin:0">启用多账号并发模式</label>
+          <label>发送账号数量（线程数由上方线程池控制，账号只作为发件身份）</label>
+          <select id="benchAccountCount">
+            <option value="1">1 个账号（alice）</option>
+            <option value="2" selected>2 个账号（alice、bob）</option>
+            <option value="3">3 个账号（alice、bob、carol）</option>
+            <option value="4">4 个账号（alice、bob、carol、dave）</option>
+          </select>
         </div>
         <div class="field" style="display:flex;gap:10px;align-items:center">
           <input type="checkbox" id="benchRsa" checked style="width:auto;margin:0">
@@ -794,20 +795,18 @@ async function runBench(){
   const box  = $("benchResult");
   const mode = $("benchMode").value;
   const threads = $("benchThreads").value;
-  const multi = $("benchMulti").checked ? "1" : "0";
-  const accounts = multi === "1" ? $("benchAccounts").value.trim() : "";
+  const accountCount = $("benchAccountCount").value;
   const names = { plain:"明文", aes:"AES-256-CBC", chacha:"ChaCha20", all:"三种全跑" };
   btn.disabled = true;
   box.style.display = "none";
   setMsg("benchMsg", "压测进行中（" + (names[mode] || mode) +
-         "，" + threads + " 线程，多账号=" + (multi === "1" ? "开" : "关") +
+         "，" + threads + " 线程，" + accountCount + " 个发件账号" +
          "，每模式 100 封 1MB+ 邮件）… 请耐心等待", false);
   try{
     // 与发信一致：压测请求/结果可选走 Web 与服务器之间的 RSA 信封（层1）
     const j = await webFetchJson("/api/benchmark?encrypt=" + encodeURIComponent(mode)
                                  + "&threads=" + encodeURIComponent(threads)
-                                 + "&multi=" + encodeURIComponent(multi)
-                                 + (accounts ? "&accounts=" + encodeURIComponent(accounts) : ""),
+                                 + "&accountCount=" + encodeURIComponent(accountCount),
                                  null, $("benchRsa").checked);
     if (!j.ok){ setMsg("benchMsg", j.msg, true); return; }
     if (!j || !Array.isArray(j.modes)){

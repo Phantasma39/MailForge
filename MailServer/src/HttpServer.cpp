@@ -1601,6 +1601,15 @@ void HttpServer::handleBenchmark(const HttpRequest& req, HttpResponse& resp) {
             pos = comma + 1;
         }
     }
+    // 前端可直接选择发送账号数量；账号只作为发件身份，不改变线程池大小。
+    int accountCount = atoi(getParam(req, "accountCount").c_str());
+    if (accountCount > 0) {
+        static const char* kAccountPool[] = {"alice", "bob", "carol", "dave"};
+        senders.clear();
+        int n = std::min(accountCount, 4);
+        for (int i = 0; i < n; ++i) addSender(kAccountPool[i]);
+    }
+
     if (senders.empty()) addSender(session.user);
     if (senders.empty()) senders.push_back(session.user + "@example.com");
 
