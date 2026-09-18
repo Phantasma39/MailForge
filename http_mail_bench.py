@@ -409,17 +409,100 @@ def algo_label(algo):
     return {"none": "明文", "aes": "AES-256-CBC", "chacha": "ChaCha20",
             "chacha20": "ChaCha20"}.get(str(algo).lower(), str(algo))
 
-def build_matrix_cases(account_modes, thread_modes, algos, server_thread_modes):
-    """生成测试矩阵：账号数 × (服务器线程池) × 客户端并发 × 加密方式。"""
+def build_matrix_cases(accounts, server_thread_modes, algos, threads_override=None):
+    """生成测试矩阵：账号数 × (服务器线程池) × 加密方式。
+
+    ★ 并发规则：客户端并发数 = 发件账号数
+        · 1 个账号 → 1 路并发（连续发送）
+        · 4 个账号 → 4 路并发（4 个账号同时各发一部分，合计仍为 --count 封）
+    threads_override 只在单账号需要额外并发档位时才用（一般不用）。
+    """
     cases = []
     st_modes = list(server_thread_modes) if server_thread_modes else [None]
-    for acc in account_modes:
+    for acc in accounts:
+        th = int(threads_override) if threads_override else int(acc)
         for st in st_modes:
-            for th in thread_modes:
-                for algo in algos:
-                    cases.append({"accounts": acc, "threads": th,
-                                  "algo": algo, "serverThreads": st})
+            for algo in algos:
+                cases.append({"accounts": acc, "threads": th,
+                              "algo": algo, "serverThreads": st})
     return cases
+
+def write_matrix_latex(rows, host, count, size_kb, out_path, server_modes):
+    """把矩阵结果写成一张 LaTeX 汇总表（xelatex 可直接编译）。
+
+    列：加密方式 | 服务器线程池 | 发送速率(封/s) | 平均检测(ms) | 下载速率(MB/s) | 平均每封传输(ms)
+    """
+    def fmt(v, nd=1):
+        try:
+            return ("%%.%df" % nd) % float(v)
+        except Exception:
+            return "--"
+
+    algo_order = [("none", "明文"), ("aes", "AES-256-CBC"), ("chacha", "ChaCha20")]
+    sts = [int(s) for s in server_modes] if server_modes else [None]
+    body = []
+    for algo, label in algo_order:
+        first = True
+        for st in sts:
+            row = None
+            for r in rows:
+                if (str(r.get("algo", "")).lower() == algo
+                        and (r.get("serverThreads") == st)):
+                    row = r
+                    break
+            if row is None:
+                cells = ["--"] * 5
+            else:
+                tested = (row.get("downloadSample") or 0) > 0
+                cells = [
+                    fmt(row.get("sendThroughput"), 2),                       # 封/s
+                    fmt(row.get("avgDetectionMs"), 0),                       # 检测 ms
+                    fmt(row.get("downloadMBps"), 2) if tested else "--",     # 下载 MB/s
+                    fmt(row.get("totalAvgMs"), 0) if tested else "--",        # 每封 ms
+                    "%.1f" % (100.0 * row["sendOk"] / max(1, row["count"])) + r"\%",
+                ]
+            lbl = (r"\multirow{%d}{*}{%s}" % (len(sts), label)) if first else ""
+            body.append("%s & %s & %s \\\\" % (lbl, (st if st else "不变"),
+                                               " & ".join(cells)))
+            first = False
+
+    tex = r"""%% MailForge 邮件传输速率压测汇总表（由 http_mail_bench.py 自动生成）
+\documentclass[11pt]{ctexart}
+\usepackage[a4paper,landscape,margin=1.6cm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\newcommand{\hd}[1]{\textbf{#1}}
+\begin{document}
+\begin{center}
+{\Large\bfseries MailForge 邮件传输速率压测汇总表}\\[4pt]
+{\small 每封 %(size)g MB，每组连续发送 %(count)d 封；目标 %(host)s；客户端并发 = 发件账号数（1 账号 1 并发 / 4 账号 4 并发）}
+\end{center}
+\vspace{0.3cm}
+\begin{center}
+\begin{tabular}{llccccc}
+\toprule
+\multirow{2}{*}{\hd{加密方式}} & \multirow{2}{*}{\hd{服务器线程池}} &
+\multirow{2}{*}{\hd{发送速率\\(封/s)}} & \multirow{2}{*}{\hd{平均检测\\(ms)}} &
+\multirow{2}{*}{\hd{下载速率\\(MB/s)}} & \multirow{2}{*}{\hd{平均每封传输\\(ms)}} &
+\multirow{2}{*}{\hd{成功率}} \\
+\midrule
+%(body)s
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{0.3cm}
+{\small 说明：发送速率＝成功封数÷发送墙钟；平均检测＝收件端 POP3 轮询发现邮件的平均延迟；\\
+下载速率＝下载总字节÷下载墙钟；平均每封传输＝(开始发送→全部下载完成)÷接收封数（未测下载时为 --）。}
+\end{document}
+""" % {"size": float(size_kb) / 1024.0, "count": int(count),
+       "host": host, "body": "\n".join(body)}
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(tex)
+    return out_path
 
 def test_one_case(args, recv_user, recv_email, send_users, sender_tokens,
                   run_id, password):
@@ -627,20 +710,28 @@ def print_matrix_table(rows, host, count, size_kb):
     print("=" * 96)
 
 def run_matrix(args):
-    """矩阵模式：遍历【账号数 × 服务器线程池 × 客户端并发 × 加密方式】。"""
+    """矩阵模式：遍历【账号数(=客户端并发) × 服务器线程池 × 加密方式】。"""
     try:
         account_modes = [int(x) for x in str(args.matrix_accounts).split(",") if x.strip()]
-        thread_modes = [int(x) for x in str(args.matrix_threads).split(",") if x.strip()]
         algo_modes = [x.strip().lower() for x in str(args.matrix_algos).split(",") if x.strip()]
         server_thread_modes = [int(x) for x in str(args.matrix_server_threads).split(",") if x.strip()]
+        # 兼容旧参数：--matrix-threads 只在单账号需要额外并发档位时才用
+        thread_override = None
+        if str(getattr(args, "matrix_threads", "")).strip() not in ("", "auto"):
+            vals = [int(x) for x in str(args.matrix_threads).split(",") if x.strip()]
+            if len(vals) == 1:
+                thread_override = vals[0]
+            else:
+                print("[warn] 并发数已按“账号数=并发数”自动绑定，忽略 --matrix-threads=%s" %
+                      args.matrix_threads)
     except ValueError:
-        print("--matrix-accounts / --matrix-threads / --matrix-server-threads 需要形如 1,4 的数字列表")
+        print("--matrix-accounts / --matrix-server-threads 需要形如 1,4 的数字列表")
         return 2
-    if not account_modes or not thread_modes or not algo_modes:
+    if not account_modes or not algo_modes:
         print("矩阵参数不能为空")
         return 2
 
-    cases = build_matrix_cases(account_modes, thread_modes, algo_modes, server_thread_modes)
+    cases = build_matrix_cases(account_modes, server_thread_modes, algo_modes, thread_override)
     tag = str(int(time.time()))[-8:]
     password = "Bench123456"
     recv_user = "netbench_recv"
@@ -648,12 +739,14 @@ def run_matrix(args):
     all_send_users = ["netbench_s%d" % (i + 1) for i in range(max(account_modes))]
 
     print("=" * 96)
-    print("MailForge 压测矩阵：%d 组（账号 %s × %s × 客户端并发 %s × 加密 %s）" %
+    print("MailForge 压测矩阵：%d 组（账号 %s × %s × 加密 %s）" %
           (len(cases), account_modes,
            ("服务器线程池 %s" % server_thread_modes) if server_thread_modes else "服务器线程池不变",
-           thread_modes, [algo_label(a) for a in algo_modes]))
+           [algo_label(a) for a in algo_modes]))
     print("每组：%d 封 × %d KB   目标：%s:%d" %
           (args.count, args.size_kb, args.host, args.http_port))
+    print("并发规则：客户端并发数 = 发件账号数（%s）" %
+          "、".join("%d 账号→%d 并发" % (a, thread_override or a) for a in account_modes))
     if server_thread_modes:
         print("说明：服务器线程池通过 /api/admin/threads 在线调整，无需重启服务器进程（范围 1~32）")
     print("=" * 96)
@@ -682,7 +775,7 @@ def run_matrix(args):
     for idx, case in enumerate(cases, 1):
         print()
         print("-" * 96)
-        print("[%d/%d] 账号=%d  客户端并发=%d  服务器线程池=%s  加密=%s" %
+        print("[%d/%d] 账号=%d（并发=%d）  服务器线程池=%s  加密=%s" %
               (idx, len(cases), case["accounts"], case["threads"],
                case["serverThreads"] if case["serverThreads"] else "不变",
                algo_label(case["algo"])))
@@ -703,6 +796,32 @@ def run_matrix(args):
                if r["downloadSample"] > 0 else ""))
 
     print_matrix_table(rows, args.host, args.count, args.size_kb)
+
+    # ---- LaTeX 汇总表 ----
+    if not args.no_tex:
+        tex_path = args.tex_out or "MailForge_Bench_Table.tex"
+        try:
+            write_matrix_latex(rows, args.host, args.count, args.size_kb,
+                               tex_path, server_thread_modes)
+            print("LaTeX 汇总表已生成：%s" % os.path.abspath(tex_path))
+            try:
+                p = subprocess.run(["xelatex", "-interaction=nonstopmode", "-halt-on-error",
+                                    os.path.basename(tex_path)],
+                                   cwd=os.path.dirname(os.path.abspath(tex_path)) or ".",
+                                   capture_output=True, text=True, timeout=180)
+                if p.returncode == 0:
+                    print("已编译出 PDF：%s" % os.path.abspath(tex_path[:-4] + ".pdf"))
+                    for ext in (".aux", ".log", ".out"):
+                        try:
+                            os.remove(tex_path[:-4] + ext)
+                        except OSError:
+                            pass
+                else:
+                    print("（tex 已生成，但 xelatex 编译未成功；tex 可直接使用）")
+            except Exception:
+                print("（未找到 xelatex，tex 文件可直接拿去用）")
+        except Exception as e:
+            print("[warn] 生成 LaTeX 表失败：%s" % e)
 
     if not args.keep:
         try:
@@ -734,15 +853,21 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="兼容参数，PDF 生成后不自动打开")
     ap.add_argument("--interactive", action="store_true", help="使用交互式问答模式")
     ap.add_argument("--matrix", action="store_true",
-                    help="矩阵模式：账号数 × 客户端并发 × 加密方式（可选 × 服务器线程池），最后打印一张汇总表")
-    ap.add_argument("--matrix-accounts", default="1,4", help="矩阵模式的账号数列表，默认 1,4")
-    ap.add_argument("--matrix-threads", default="1,4", help="矩阵模式的客户端并发列表，默认 1,4")
+                    help="矩阵模式：账号数(=客户端并发) × 服务器线程池 × 加密方式，最后打印汇总表并生成 LaTeX 表")
+    ap.add_argument("--matrix-accounts", default="1,4",
+                    help="矩阵模式的账号数列表，默认 1,4；客户端并发自动等于账号数（1账号1并发、4账号4并发）")
+    ap.add_argument("--matrix-threads", default="auto",
+                    help="并发数，默认 auto＝跟随账号数；只有单账号要额外并发档位时才填（如 4）")
     ap.add_argument("--matrix-algos", default="none,aes,chacha",
                     help="矩阵模式的加密方式列表，默认 none,aes,chacha")
     ap.add_argument("--matrix-server-threads", default="",
                     help="矩阵模式下要在线设置的【服务器线程池】大小列表（如 1,4）；留空表示不改服务器线程池")
     ap.add_argument("--admin-token", default="mailforge-admin",
                     help="管理员令牌，用于在线调整服务器线程池（对应 MAILFORGE_ADMIN_TOKEN）")
+    ap.add_argument("--tex-out", default="MailForge_Bench_Table.tex",
+                    help="矩阵模式输出的 LaTeX 汇总表路径")
+    ap.add_argument("--no-tex", action="store_true",
+                    help="矩阵模式不生成 LaTeX 表（默认生成，并尝试用 xelatex 编译成 PDF）")
     args = ap.parse_args()
 
     if args.matrix:
