@@ -591,6 +591,9 @@ def test_one_case(args, recv_user, recv_email, send_users, sender_tokens,
     result["downloadAvgMs"] = download_ms_sum / max(1, download_ok)
     result["downloadMBps"] = (download_bytes / 1048576.0) / max(0.001, download_wall_ms / 1000.0)
     result["totalAvgMs"] = (result["sendAvgMs"] + result["downloadAvgMs"]) if download_ok > 0 else 0.0
+    # 与单次模式保持同名键：检测延迟 = 端到端平均接收延迟
+    result["avgDetectionMs"] = result["avgReceiveMs"]
+    result["detectionTotalMs"] = result["e2eTotalMs"]
 
     # 清理本组邮件，避免影响下一组
     try:
