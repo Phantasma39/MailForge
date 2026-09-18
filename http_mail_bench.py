@@ -374,6 +374,341 @@ def interactive_setup(args):
     print("  下载抽样：%d 封，并发 %d" % (args.download_count, args.download_threads))
     input("按回车开始测试...")
 
+# ===========================================================================
+#  矩阵模式：账号数 × 客户端并发 × 加密方式 ×【服务器线程池】
+#    - 服务器线程池通过 /api/admin/threads 在线调整，无需重启服务器进程
+#    - 单次模式（原有的 --threads/--accounts/--algo）逻辑完全不变
+# ===========================================================================
+
+def http_get(host, port, path, timeout=10):
+    with urllib.request.urlopen("http://%s:%d%s" % (host, port, path), timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def get_server_threads(host, http_port, token, timeout=10):
+    """读取服务器当前线程池 worker 数（GET /api/admin/threads）。"""
+    r = http_get(host, http_port,
+                 "/api/admin/threads?" + urllib.parse.urlencode({"adminToken": token}),
+                 timeout=timeout)
+    if not r.get("ok"):
+        raise RuntimeError("读取服务器线程数失败: %s" % r.get("msg"))
+    return int(r.get("threads"))
+
+def set_server_threads(host, http_port, n, token, timeout=15):
+    """在线设置服务器线程池大小（POST /api/admin/threads），不需要重启服务器：
+    服务器会新建线程池接替旧池，正在处理的连接不受影响，新连接立即按新线程数处理。"""
+    r = http_post(host, http_port, "/api/admin/threads",
+                  {"adminToken": token, "threads": int(n)}, timeout=timeout)
+    if not r.get("ok"):
+        raise RuntimeError("设置服务器线程数失败: %s" % r.get("msg"))
+    got = get_server_threads(host, http_port, token, timeout=timeout)
+    if got != int(n):
+        raise RuntimeError("线程数读回不一致：期望 %d，实际 %d" % (int(n), got))
+    return got
+
+def algo_label(algo):
+    return {"none": "明文", "aes": "AES-256-CBC", "chacha": "ChaCha20",
+            "chacha20": "ChaCha20"}.get(str(algo).lower(), str(algo))
+
+def build_matrix_cases(account_modes, thread_modes, algos, server_thread_modes):
+    """生成测试矩阵：账号数 × (服务器线程池) × 客户端并发 × 加密方式。"""
+    cases = []
+    st_modes = list(server_thread_modes) if server_thread_modes else [None]
+    for acc in account_modes:
+        for st in st_modes:
+            for th in thread_modes:
+                for algo in algos:
+                    cases.append({"accounts": acc, "threads": th,
+                                  "algo": algo, "serverThreads": st})
+    return cases
+
+def test_one_case(args, recv_user, recv_email, send_users, sender_tokens,
+                  run_id, password):
+    """跑一组测试（发送 → 收件 → 抽样下载），返回统计字典。
+
+    与单次模式使用同一套统计口径：sendWallMs / sendAvgMs / sendThroughput /
+    avgDetectionMs / downloadAvgMs / downloadMBps / totalAvgMs 等字段名保持一致。
+    """
+    # 需要时先在线调整服务器线程池（不重启服务器）
+    server_threads = None
+    if getattr(args, "server_threads", None):
+        try:
+            server_threads = set_server_threads(args.host, args.http_port,
+                                                args.server_threads, args.admin_token)
+            print("  [服务器] 线程池已在线调整为 %d（进程未重启）" % server_threads)
+        except Exception as e:
+            print("  [warn] 调整服务器线程池失败（继续用原线程数）: %s" % e)
+
+    # 清空收件账号，保证每组都从同一基线开始
+    try:
+        pop3_delete_all(args.host, args.pop3_port, recv_user, password)
+    except Exception as e:
+        print("  [warn] 清理收件箱失败: %s" % e)
+
+    baseline = pop3_uids(args.host, args.pop3_port, recv_user, password)
+    body = "A" * max(1, args.size_kb * 1024)
+
+    send_results = [None] * args.count
+    stop_flag = threading.Event()
+    recv_events = []
+    recv_lock = threading.Lock()
+
+    def receiver():
+        seen = set(baseline)
+        while not stop_flag.is_set():
+            try:
+                now = pop3_uids(args.host, args.pop3_port, recv_user, password)
+                new_uids = now - seen
+                if new_uids:
+                    with recv_lock:
+                        for uid in new_uids:
+                            recv_events.append((uid, time.perf_counter()))
+                    seen |= new_uids
+                if len(recv_events) >= args.count:
+                    return
+            except Exception:
+                pass
+            time.sleep(max(0.05, args.poll))
+
+    recv_thread = threading.Thread(target=receiver, daemon=True)
+    recv_thread.start()
+
+    def send_one(i):
+        token = sender_tokens[i % len(sender_tokens)]
+        data = {
+            "token": token,
+            "to": recv_email,
+            "subject": "[%s] #%d" % (run_id, i + 1),
+            "body": body,
+        }
+        if args.algo != "none":
+            data["encrypt"] = "1"
+            data["algo"] = "chacha" if args.algo in ("chacha", "chacha20") else "aes"
+        t0 = time.perf_counter()
+        try:
+            r = http_post(args.host, args.http_port, "/api/send", data,
+                          timeout=max(60, int(args.timeout)))
+            ok = bool(r.get("ok"))
+            msg = r.get("msg", "")
+        except Exception as e:
+            ok = False
+            msg = str(e)
+        t1 = time.perf_counter()
+        send_results[i] = {
+            "ok": ok,
+            "start": t0,
+            "ms": (t1 - t0) * 1000.0,
+            "sender": send_users[i % len(send_users)],
+            "msg": msg,
+        }
+
+    send_wall_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
+        futs = [ex.submit(send_one, i) for i in range(args.count)]
+        for f in as_completed(futs):
+            f.result()
+    send_wall_end = time.perf_counter()
+
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        with recv_lock:
+            n = len(recv_events)
+        if n >= args.count or not recv_thread.is_alive():
+            break
+        time.sleep(0.1)
+    stop_flag.set()
+    recv_thread.join(timeout=3.0)
+
+    ok = sum(1 for r in send_results if r and r["ok"])
+    send_ms = sum(r["ms"] for r in send_results if r and r["ok"])
+    send_wall = send_wall_end - send_wall_start
+    with recv_lock:
+        received = len(recv_events)
+        events = sorted(recv_events, key=lambda x: x[1])
+    recv_done = events[-1][1] if events else None
+    first_send = min((r["start"] for r in send_results if r), default=None)
+    e2e_total = (recv_done - first_send) if (recv_done and first_send) else 0.0
+
+    result = {
+        "host": args.host,
+        "count": args.count,
+        "sizeKB": args.size_kb,
+        "threads": args.threads,
+        "accounts": args.accounts,
+        "algo": args.algo,
+        "sendOk": ok,
+        "sendFail": args.count - ok,
+        "sendWallMs": send_wall * 1000.0,
+        "sendAvgMs": send_ms / max(1, ok),
+        "sendThroughput": ok / max(0.001, send_wall),
+        "received": received,
+        "lossRate": (args.count - received) * 100.0 / max(1, args.count),
+        "e2eTotalMs": e2e_total * 1000.0,
+        "avgReceiveMs": (e2e_total / received * 1000.0) if received else 0.0,
+        "serverThreads": server_threads,
+    }
+
+    # 抽样下载（与原版同一口径：downloadAvgMs / downloadMBps）
+    download_ok = 0
+    download_fail = 0
+    download_ms_sum = 0.0
+    download_bytes = 0
+    download_wall_ms = 0.0
+    download_sample = 0
+    if args.download_count != 0 and received > 0:
+        n_download = len(events) if args.download_count < 0 else min(args.download_count, len(events))
+        if n_download > 0:
+            uids = [uid for uid, _ in events[:n_download]]
+            n_threads = max(1, min(args.download_threads, len(uids)))
+            chunks = []
+            for wi in range(n_threads):
+                b = len(uids) * wi // n_threads
+                e = len(uids) * (wi + 1) // n_threads
+                if b < e:
+                    chunks.append(uids[b:e])
+            print("  [下载测速] 抽样 %d 封，%d 个 POP3 并发连接 ..." % (n_download, len(chunks)))
+            dwall0 = time.perf_counter()
+            all_results = []
+            with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+                futs = [ex.submit(download_batch, args.host, args.pop3_port, recv_user,
+                                  password, chunk, max(60, int(args.timeout)))
+                        for chunk in chunks]
+                for f in as_completed(futs):
+                    all_results.extend(f.result())
+            download_wall_ms = (time.perf_counter() - dwall0) * 1000.0
+            for okd, ms, nbytes, err in all_results:
+                if okd:
+                    download_ok += 1
+                    download_ms_sum += ms
+                    download_bytes += nbytes
+                else:
+                    download_fail += 1
+            download_sample = n_download
+
+    result["downloadSample"] = download_sample
+    result["downloadOk"] = download_ok
+    result["downloadFail"] = download_fail
+    result["downloadWallMs"] = download_wall_ms
+    result["downloadAvgMs"] = download_ms_sum / max(1, download_ok)
+    result["downloadMBps"] = (download_bytes / 1048576.0) / max(0.001, download_wall_ms / 1000.0)
+    result["totalAvgMs"] = (result["sendAvgMs"] + result["downloadAvgMs"]) if download_ok > 0 else 0.0
+
+    # 清理本组邮件，避免影响下一组
+    try:
+        pop3_delete_all(args.host, args.pop3_port, recv_user, password)
+    except Exception:
+        pass
+    return result
+
+def print_matrix_table(rows, host, count, size_kb):
+    """把矩阵结果汇总成一张窄表（避免终端折行）。未测下载的列显示“未测”。"""
+    print()
+    print("=" * 96)
+    print("MailForge 压测汇总（目标 %s，每封 %d KB，共 %d 封/组）" % (host, size_kb, count))
+    print("=" * 96)
+    print("%-2s %-4s %-4s %-11s %-7s %-8s %-9s %-7s %-6s" %
+          ("#", "账号", "服务线", "加密", "封/s", "检测ms", "下载MB/s", "每封ms", "成功"))
+    print("-" * 96)
+    for i, r in enumerate(rows, 1):
+        tested_dl = (r.get("downloadSample") or 0) > 0
+        dl = ("%.2f" % r["downloadMBps"]) if tested_dl else "未测"
+        per_mail = ("%.0f" % r["totalAvgMs"]) if tested_dl else "未测"
+        print("%-2d %-4d %-4s %-11s %7.2f %8.0f %9s %7s %5.1f%%" %
+              (i, r["accounts"],
+               str(r.get("serverThreads") if r.get("serverThreads") else "-"),
+               algo_label(r["algo"]),
+               r["sendThroughput"], r["avgDetectionMs"], dl, per_mail,
+               100.0 * r["sendOk"] / max(1, r["count"])))
+    print("=" * 96)
+    print("封/s = 发送速率；检测ms = POP3 发现邮件的平均延迟；下载MB/s = 下载字节÷下载耗时；")
+    print("每封ms = 发送平均 + 下载平均（未测下载时无意义，用 --download-count -1 可测）。")
+    print("=" * 96)
+
+def run_matrix(args):
+    """矩阵模式：遍历【账号数 × 服务器线程池 × 客户端并发 × 加密方式】。"""
+    try:
+        account_modes = [int(x) for x in str(args.matrix_accounts).split(",") if x.strip()]
+        thread_modes = [int(x) for x in str(args.matrix_threads).split(",") if x.strip()]
+        algo_modes = [x.strip().lower() for x in str(args.matrix_algos).split(",") if x.strip()]
+        server_thread_modes = [int(x) for x in str(args.matrix_server_threads).split(",") if x.strip()]
+    except ValueError:
+        print("--matrix-accounts / --matrix-threads / --matrix-server-threads 需要形如 1,4 的数字列表")
+        return 2
+    if not account_modes or not thread_modes or not algo_modes:
+        print("矩阵参数不能为空")
+        return 2
+
+    cases = build_matrix_cases(account_modes, thread_modes, algo_modes, server_thread_modes)
+    tag = str(int(time.time()))[-8:]
+    password = "Bench123456"
+    recv_user = "netbench_recv"
+    recv_email = recv_user + "@example.com"
+    all_send_users = ["netbench_s%d" % (i + 1) for i in range(max(account_modes))]
+
+    print("=" * 96)
+    print("MailForge 压测矩阵：%d 组（账号 %s × %s × 客户端并发 %s × 加密 %s）" %
+          (len(cases), account_modes,
+           ("服务器线程池 %s" % server_thread_modes) if server_thread_modes else "服务器线程池不变",
+           thread_modes, [algo_label(a) for a in algo_modes]))
+    print("每组：%d 封 × %d KB   目标：%s:%d" %
+          (args.count, args.size_kb, args.host, args.http_port))
+    if server_thread_modes:
+        print("说明：服务器线程池通过 /api/admin/threads 在线调整，无需重启服务器进程（范围 1~32）")
+    print("=" * 96)
+
+    print("[准备] 注册/登录测试账号 ...")
+    ensure_account(args.host, args.http_port, recv_user, password)
+    token_cache = {}
+
+    def token_of(u):
+        if u not in token_cache:
+            token_cache[u] = ensure_account(args.host, args.http_port, u, password)
+        return token_cache[u]
+
+    for u in all_send_users:
+        token_of(u)
+    print("       收件账号：%s" % recv_user)
+    print("       发件账号：%s" % ", ".join(all_send_users))
+    if server_thread_modes:
+        try:
+            print("       服务器当前线程池：%d（测试中按需在线调整）" %
+                  get_server_threads(args.host, args.http_port, args.admin_token))
+        except Exception as e:
+            print("       [warn] 读取服务器线程数失败：%s" % e)
+
+    rows = []
+    for idx, case in enumerate(cases, 1):
+        print()
+        print("-" * 96)
+        print("[%d/%d] 账号=%d  客户端并发=%d  服务器线程池=%s  加密=%s" %
+              (idx, len(cases), case["accounts"], case["threads"],
+               case["serverThreads"] if case["serverThreads"] else "不变",
+               algo_label(case["algo"])))
+        print("-" * 96)
+        send_users = all_send_users[:case["accounts"]]
+        tokens = [token_of(u) for u in send_users]
+        args.accounts = case["accounts"]
+        args.threads = case["threads"]
+        args.algo = case["algo"]
+        args.server_threads = case["serverThreads"]
+        run_id = "m%s-a%d-c%d-s%s-%s" % (tag, case["accounts"], case["threads"],
+                                         case["serverThreads"], case["algo"])
+        r = test_one_case(args, recv_user, recv_email, send_users, tokens, run_id, password)
+        rows.append(r)
+        print("  → 发送 %d/%d  接收 %d  发送速度 %.2f 封/s  平均发送 %.0f ms%s" %
+              (r["sendOk"], r["count"], r["received"], r["sendThroughput"], r["sendAvgMs"],
+               ("  下载 %.0f ms / %.2f MB/s" % (r["downloadAvgMs"], r["downloadMBps"]))
+               if r["downloadSample"] > 0 else ""))
+
+    print_matrix_table(rows, args.host, args.count, args.size_kb)
+
+    if not args.keep:
+        try:
+            deleted = pop3_delete_all(args.host, args.pop3_port, recv_user, password)
+            print("[cleanup] 已清空收件账号 %d 封测试邮件" % deleted)
+        except Exception as e:
+            print("[cleanup] 清理失败: %s" % e)
+    return 0
+
 def main():
     ap = argparse.ArgumentParser(description="MailForge HTTP multi-account send/receive benchmark")
     ap.add_argument("--host", default="140.143.233.15")
@@ -395,8 +730,24 @@ def main():
     ap.add_argument("--report", default="", help="PDF 报告输出路径，默认按当前时间命名")
     ap.add_argument("--no-open", action="store_true", help="兼容参数，PDF 生成后不自动打开")
     ap.add_argument("--interactive", action="store_true", help="使用交互式问答模式")
+    ap.add_argument("--matrix", action="store_true",
+                    help="矩阵模式：账号数 × 客户端并发 × 加密方式（可选 × 服务器线程池），最后打印一张汇总表")
+    ap.add_argument("--matrix-accounts", default="1,4", help="矩阵模式的账号数列表，默认 1,4")
+    ap.add_argument("--matrix-threads", default="1,4", help="矩阵模式的客户端并发列表，默认 1,4")
+    ap.add_argument("--matrix-algos", default="none,aes,chacha",
+                    help="矩阵模式的加密方式列表，默认 none,aes,chacha")
+    ap.add_argument("--matrix-server-threads", default="",
+                    help="矩阵模式下要在线设置的【服务器线程池】大小列表（如 1,4）；留空表示不改服务器线程池")
+    ap.add_argument("--admin-token", default="mailforge-admin",
+                    help="管理员令牌，用于在线调整服务器线程池（对应 MAILFORGE_ADMIN_TOKEN）")
     args = ap.parse_args()
 
+    if args.matrix:
+        return run_matrix(args)
+
+    return main_single(args)
+
+def main_single(args):
     if args.interactive or len(sys.argv) == 1:
         interactive_setup(args)
 
