@@ -475,21 +475,20 @@ def write_matrix_latex(rows, host, count, size_kb, out_path, server_modes):
 \pagestyle{empty}
 \setlength{\parindent}{0pt}
 \newcommand{\hd}[1]{\textbf{#1}}
+\newcommand{\hh}[1]{\hd{\shortstack{#1}}}   % 表头多行（\\ 只能写在 \shortstack 里）
 \begin{document}
 \begin{center}
 {\Large\bfseries MailForge 邮件传输速率压测汇总表}\\[4pt]
-{\small 每封 %(size)g MB，每组连续发送 %(count)d 封；目标 %(host)s；客户端并发 = 发件账号数（1 账号 1 并发 / 4 账号 4 并发）}
+{\small 每封 @@SIZE@@ MB，每组连续发送 @@COUNT@@ 封；目标 @@HOST@@；客户端并发 = 发件账号数（1 账号 1 并发 / 4 账号 4 并发）}
 \end{center}
 \vspace{0.3cm}
 \begin{center}
 \begin{tabular}{llccccc}
 \toprule
-\multirow{2}{*}{\hd{加密方式}} & \multirow{2}{*}{\hd{服务器线程池}} &
-\multirow{2}{*}{\hd{发送速率\\(封/s)}} & \multirow{2}{*}{\hd{平均检测\\(ms)}} &
-\multirow{2}{*}{\hd{下载速率\\(MB/s)}} & \multirow{2}{*}{\hd{平均每封传输\\(ms)}} &
-\multirow{2}{*}{\hd{成功率}} \\
+\hh{加密方式} & \hh{服务器线程池} & \hh{发送速率\\（封/s）} & \hh{平均检测\\（ms）} &
+\hh{下载速率\\（MB/s）} & \hh{平均每封传输\\（ms）} & \hh{成功率} \\
 \midrule
-%(body)s
+@@BODY@@
 \bottomrule
 \end{tabular}
 \end{center}
@@ -497,11 +496,29 @@ def write_matrix_latex(rows, host, count, size_kb, out_path, server_modes):
 {\small 说明：发送速率＝成功封数÷发送墙钟；平均检测＝收件端 POP3 轮询发现邮件的平均延迟；\\
 下载速率＝下载总字节÷下载墙钟；平均每封传输＝(开始发送→全部下载完成)÷接收封数（未测下载时为 --）。}
 \end{document}
-""" % {"size": float(size_kb) / 1024.0, "count": int(count),
-       "host": host, "body": "\n".join(body)}
+"""
+    # 用 replace 填占位符：模板里有 % 号（成功率的 \%），不能用 %-格式化
+    tex = (tex.replace("@@SIZE@@", "%g" % (float(size_kb) / 1024.0))
+              .replace("@@COUNT@@", str(int(count)))
+              .replace("@@HOST@@", str(host))
+              .replace("@@BODY@@", "\n".join(body)))
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(tex)
+    # 写文件：目标被占用/只读时，先去掉只读位重试，仍失败就换带时间戳的文件名
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(tex)
+    except PermissionError:
+        try:
+            os.chmod(out_path, 0o666)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(tex)
+            print("[warn] 原文件只读，已去掉只读位后写入")
+        except Exception:
+            alt = out_path[:-4] + "_" + datetime.datetime.now().strftime("%H%M%S") + ".tex"
+            with open(alt, "w", encoding="utf-8") as f:
+                f.write(tex)
+            print("[warn] %s 被占用（可能在编辑器/PDF阅读器中打开），已改写到 %s" % (out_path, alt))
+            out_path = alt
     return out_path
 
 def test_one_case(args, recv_user, recv_email, send_users, sender_tokens,
